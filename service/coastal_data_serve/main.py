@@ -15,7 +15,11 @@ from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from coastal_sim_data.dispatcher import dispatch_forcing_request  # noqa: E402
+from coastal_sim_data.dispatcher import (  # noqa: E402
+    dispatch_forcing_request,
+    dispatch_station_profiles_request,
+    dispatch_bounding_box_profiles_request,
+)
 from coastal_data_serve.routers import viewer  # noqa: E402
 from coastal_sim_data.fetchers.noaa import fetch_noaa_tide_data  # noqa: E402
 
@@ -118,6 +122,13 @@ class TideRequest(BaseModel):
     cache_bust: bool = False
 
 
+class TelemetryRequest(BaseModel):
+    station_id: str
+    start_time: str  # ISO8601 string
+    end_time: str  # ISO8601 string
+    cache_bust: bool = False
+
+
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
     """Basic health check endpoint."""
@@ -154,6 +165,58 @@ async def get_tide_data(request: TideRequest) -> Dict[str, Any]:
         return {"status": "success", "data": data}
     except Exception as e:
         logger.error(f"Tide fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TelemetryBBoxRequest(BaseModel):
+    bbox: BoundingBox
+    start_time: str  # ISO8601 string
+    end_time: str  # ISO8601 string
+    cache_bust: bool = False
+
+
+@app.post("/api/v1/telemetry/station")
+async def get_station_telemetry(request: TelemetryRequest) -> Dict[str, Any]:
+    """Fetch 3-depth telemetry profile data for structural nudging."""
+    logger.info(
+        f"Received telemetry request for station {request.station_id} from {request.start_time} to {request.end_time}"
+    )
+    try:
+        data = dispatch_station_profiles_request(
+            station_id=request.station_id,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            cache_bust=request.cache_bust,
+        )
+        return {"status": "success", "data": data}
+    except Exception as e:
+        logger.error(f"Telemetry fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/telemetry/bbox")
+async def get_bbox_telemetry(request: TelemetryBBoxRequest) -> Dict[str, Any]:
+    """Fetch structured nudge telemetry for all stations in bounding box."""
+    logger.info(
+        f"Received bbox telemetry request for {request.bbox} from {request.start_time} to {request.end_time}"
+    )
+    try:
+        # Convert Request bbox to list [min_lon, min_lat, max_lon, max_lat]
+        bbox_list = [
+            request.bbox.min_lon,
+            request.bbox.min_lat,
+            request.bbox.max_lon,
+            request.bbox.max_lat,
+        ]
+        data = dispatch_bounding_box_profiles_request(
+            bbox=bbox_list,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            cache_bust=request.cache_bust,
+        )
+        return {"status": "success", "data": data}
+    except Exception as e:
+        logger.error(f"BBox telemetry fetch failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

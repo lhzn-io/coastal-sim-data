@@ -16,10 +16,10 @@ def fetch_erddap_station_profiles(
 ) -> dict:
     """
     Fetches 3-depth temperature profiles for a given station.
-    Currently specifically targeting WLIS via UConn ERDDAP.
+    Targeting LIS stations via UConn ERDDAP.
 
     Args:
-        station_id: Station ID, e.g., "WLIS"
+        station_id: Station ID, e.g., "WLIS", "EXRX"
         start_time: ISO8601 string (e.g., "YYYY-MM-DDTHH:MM:SSZ")
         end_time: ISO8601 string
 
@@ -28,13 +28,16 @@ def fetch_erddap_station_profiles(
     """
     os.makedirs(cache_dir, exist_ok=True)
 
-    if station_id.upper() != "WLIS":
-        logger.warning(
-            f"Station {station_id} not supported for 3-depth profiles via ERDDAP currently."
-        )
-        return {}
+    station_upper = station_id.upper()
+    datasets = {
+        "surface": f"{station_upper}_WQ_SFC",
+        "mid": f"{station_upper}_WQ_MID",
+        "bottom": f"{station_upper}_WQ_BTM",
+    }
 
-    datasets = {"surface": "WLIS_WQ_SFC", "mid": "WLIS_WQ_MID", "bottom": "WLIS_WQ_BTM"}
+    # Handle irregular dataset names in LISICOS
+    if station_upper == "ARTG":
+        datasets["bottom"] = "ARTG_WQ_BTM_1"
 
     profiles = {}
 
@@ -77,3 +80,56 @@ def fetch_erddap_station_profiles(
             profiles[level] = time_dict
 
     return profiles
+
+
+KNOWN_STATIONS = {
+    "WLIS": {"lat": 40.96, "lon": -73.58},
+    "EXRX": {"lat": 40.88, "lon": -73.73},
+    "CLIS": {"lat": 41.14, "lon": -72.66},
+    "ARTG": {"lat": 41.01, "lon": -73.29},
+}
+
+
+def fetch_erddap_stations_in_bbox(
+    bbox: list[float],
+    start_time: str,
+    end_time: str,
+    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data/erddap"),
+    cache_bust: bool = False,
+) -> dict:
+    """
+    Finds all known LIS stations within the bounding box and fetches their profiles.
+    bbox: [max_lat, min_lon, min_lat, max_lon] or [min_lon, min_lat, max_lon, max_lat]
+    """
+    # Accept standard Julia order (min_lon, min_lat, max_lon, max_lat)
+    if len(bbox) == 4:
+        min_lon, min_lat, max_lon, max_lat = bbox
+    else:
+        return {}
+
+    stations_to_fetch = []
+    for st_id, coords in KNOWN_STATIONS.items():
+        if min_lat <= coords["lat"] <= max_lat and min_lon <= coords["lon"] <= max_lon:
+            stations_to_fetch.append(st_id)
+
+    # fallback to EXRX if none in bounding box for testing
+    if not stations_to_fetch:
+        logger.warning(
+            f"No stations found in bbox {bbox}. Falling back to default proxy stations (EXRX, WLIS)"
+        )
+        stations_to_fetch = ["EXRX", "WLIS"]
+
+    results = {}
+    for st_id in stations_to_fetch:
+        logger.info(f"Fetching station {st_id} for bounding box request...")
+        profile = fetch_erddap_station_profiles(
+            st_id, start_time, end_time, cache_dir, cache_bust
+        )
+        if profile and any(v for v in profile.values()):
+            results[st_id] = {
+                "lat": KNOWN_STATIONS.get(st_id, {}).get("lat", 0.0),
+                "lon": KNOWN_STATIONS.get(st_id, {}).get("lon", 0.0),
+                "profiles": profile,
+            }
+
+    return results

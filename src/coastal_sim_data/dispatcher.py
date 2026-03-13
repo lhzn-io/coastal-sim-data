@@ -211,3 +211,33 @@ def dispatch_station_profiles_request(
     except Exception as e:
         logger.error(f"Failed to fetch profiles for {station_id}: {e}")
         return {}
+
+
+def dispatch_bounding_box_profiles_request(
+    bbox: list[float],
+    start_time: str,
+    end_time: str,
+    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data/erddap"),
+    cache_bust: bool = False,
+) -> dict:
+    """
+    Tiered modality dispatcher for internal nudging profiles across a domain.
+    """
+    logger.info(
+        f"Dispatching bounded profile request for {bbox} ({start_time} to {end_time})"
+    )
+
+    from coastal_sim_data.fetchers.erddap import fetch_erddap_stations_in_bbox
+
+    try:
+        profiles = fetch_erddap_stations_in_bbox(
+            bbox=bbox,
+            start_time=start_time,
+            end_time=end_time,
+            cache_dir=cache_dir,
+            cache_bust=cache_bust,
+        )
+        return profiles
+    except Exception as e:
+        logger.error(f"Failed to fetch bounded profiles: {e}")
+        return {}
