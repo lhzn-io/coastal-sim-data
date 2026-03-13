@@ -157,3 +157,24 @@ def test_dispatch_ic_fallback_to_hycom(
     assert mock_maracoos.called
     assert mock_hycom.called
     assert mock_ds.to_zarr.called
+
+
+def test_dispatch_station_profiles_request_wlis(mocker):
+    from coastal_sim_data.dispatcher import dispatch_station_profiles_request
+
+    mock_fetcher = mocker.patch(
+        "coastal_sim_data.fetchers.erddap.fetch_erddap_station_profiles"
+    )
+    mock_fetcher.return_value = {"surface": {"2024-05-01T00:00:00": 10.0}}
+
+    result = dispatch_station_profiles_request(
+        "WLIS", "2024-05-01T00:00:00Z", "2024-05-01T06:00:00Z"
+    )
+    assert "surface" in result
+    mock_fetcher.assert_called_once_with(
+        station_id="WLIS",
+        start_time="2024-05-01T00:00:00Z",
+        end_time="2024-05-01T06:00:00Z",
+        cache_dir="/home/lhzn/.cache/coastal-sim-data/erddap",
+        cache_bust=False,
+    )

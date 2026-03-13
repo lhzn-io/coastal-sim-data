@@ -17,7 +17,7 @@ The service exposes HTTP APIs (via FastAPI) which:
    local Zarr cache (`~/.cache/coastal-sim-data`).
 2. Dispatch fetch operations via tiered fallbacks (e.g., HRRR -> ERA5T -> ERA5
    for atmospheric conditions, NERACOOS -> MARACOOS -> HYCOM for initial ocean
-   states).
+   states, and ERDDAP for structural telemetry and nudging profiles).
 3. Regrid heterogeneous GRIB/NetCDF outputs to CF-compliant `xarray` Zarr stores
    for seamless consumption.
 

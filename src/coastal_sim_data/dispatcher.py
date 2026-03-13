@@ -179,3 +179,35 @@ def dispatch_ic_request(
     )
 
     return zarr_path
+
+
+def dispatch_station_profiles_request(
+    station_id: str,
+    start_time: str,
+    end_time: str,
+    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data/erddap"),
+    cache_bust: bool = False,
+) -> dict:
+    """
+    Tiered modality dispatcher for internal nudging profiles.
+    Currently routes WLIS directly to the ERDDAP fetcher.
+    """
+    logger.info(
+        f"Dispatching station profile request for {station_id} ({start_time} to {end_time})"
+    )
+
+    # We could implement a real fallback strategy here, but for now we dispatch straight to our ERDDAP module
+    from coastal_sim_data.fetchers.erddap import fetch_erddap_station_profiles
+
+    try:
+        profiles = fetch_erddap_station_profiles(
+            station_id=station_id,
+            start_time=start_time,
+            end_time=end_time,
+            cache_dir=cache_dir,
+            cache_bust=cache_bust,
+        )
+        return profiles
+    except Exception as e:
+        logger.error(f"Failed to fetch profiles for {station_id}: {e}")
+        return {}
