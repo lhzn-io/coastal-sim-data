@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 def dispatch_forcing_request(
     target_date: str,
     bbox: list[float],
-    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data"),
+    cache_dir: str = os.environ.get(
+        "COASTAL_SIM_DATA_CACHE_DIR", os.path.expanduser("~/.cache/coastal-sim-data")
+    ),
     cache_bust: bool = False,
 ) -> str:
     """
@@ -105,7 +107,9 @@ def dispatch_forcing_request(
 def dispatch_ic_request(
     target_date: str,
     bbox: list[float],
-    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data"),
+    cache_dir: str = os.environ.get(
+        "COASTAL_SIM_DATA_CACHE_DIR", os.path.expanduser("~/.cache/coastal-sim-data")
+    ),
     cache_bust: bool = False,
     zarr_path: Optional[str] = None,
 ) -> str:
@@ -185,7 +189,13 @@ def dispatch_station_profiles_request(
     station_id: str,
     start_time: str,
     end_time: str,
-    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data/erddap"),
+    cache_dir: str = os.path.join(
+        os.environ.get(
+            "COASTAL_SIM_DATA_CACHE_DIR",
+            os.path.expanduser("~/.cache/coastal-sim-data"),
+        ),
+        "erddap",
+    ),
     cache_bust: bool = False,
 ) -> dict:
     """
@@ -217,7 +227,13 @@ def dispatch_bounding_box_profiles_request(
     bbox: list[float],
     start_time: str,
     end_time: str,
-    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data/erddap"),
+    cache_dir: str = os.path.join(
+        os.environ.get(
+            "COASTAL_SIM_DATA_CACHE_DIR",
+            os.path.expanduser("~/.cache/coastal-sim-data"),
+        ),
+        "erddap",
+    ),
     cache_bust: bool = False,
 ) -> dict:
     """

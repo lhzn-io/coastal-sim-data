@@ -23,7 +23,11 @@ class CacheItem(BaseModel):
 @router.get("/inventory", response_model=List[CacheItem])
 async def get_cache_inventory():
     """Crawls the local data cache and returns an inventory of all processed forcing datasets."""
-    cache_dir = Path(os.path.expanduser("~/.cache/coastal-sim-data"))
+    cache_dir = Path(
+        Path(
+            os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+        ).expanduser()
+    )
     if not cache_dir.exists():
         return []
 
@@ -84,7 +88,9 @@ async def get_dataset_preview(
     import matplotlib.pyplot as plt
     import numpy as np
 
-    cache_dir = os.path.expanduser("~/.cache/coastal-sim-data")
+    cache_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
     full_path = ""
 
     if ext == "zarr":

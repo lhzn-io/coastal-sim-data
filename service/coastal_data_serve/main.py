@@ -20,7 +20,7 @@ from coastal_sim_data.dispatcher import (  # noqa: E402
     dispatch_station_profiles_request,
     dispatch_bounding_box_profiles_request,
 )
-from coastal_data_serve.routers import viewer  # noqa: E402
+from coastal_data_serve.routers import viewer, bathymetry  # noqa: E402
 from coastal_sim_data.fetchers.noaa import fetch_noaa_tide_data  # noqa: E402
 
 # Configure Logging
@@ -72,6 +72,7 @@ app = FastAPI(
 )
 
 app.include_router(viewer.router)
+app.include_router(bathymetry.router)
 
 # Ensure static UI directory exists
 ui_dir = Path("static")
@@ -129,6 +130,29 @@ class TelemetryRequest(BaseModel):
     cache_bust: bool = False
 
 
+class HoTRequest(BaseModel):
+    lat: float
+
+    lon: float
+
+    radius_km: float = 20.0
+
+
+@app.post("/api/v1/hot_discovery")
+async def hot_discovery(req: HoTRequest):
+    """Discover head of tide limits using OSM API."""
+
+    from coastal_sim_data.fetchers.hydrography import find_head_of_tide
+
+    try:
+        results = find_head_of_tide(req.lat, req.lon, req.radius_km)
+
+        return {"status": "success", "results": results}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
     """Basic health check endpoint."""
@@ -138,7 +162,9 @@ async def health_check() -> Dict[str, str]:
 @app.api_route("/api/v1/cache/purge", methods=["GET", "POST"])
 async def purge_cache() -> Dict[str, str]:
     """Purges the forcing and IC data cache. Supports both GET (manual) and POST (UI)."""
-    cache_dir = os.path.expanduser("~/.cache/coastal-sim-data")
+    cache_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
     if os.path.exists(cache_dir):
         logger.info(f"Purging cache directory: {cache_dir}")
         try:
@@ -237,7 +263,9 @@ async def generate_bc(request: ForcingRequest) -> Dict[str, Any]:
     md5_hash = hashlib.md5(hash_str.encode()).hexdigest()[:12]
     zarr_id = f"bc_{md5_hash}"
 
-    base_dir = os.path.expanduser("~/.cache/coastal-sim-data")
+    base_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
     zarr_path = os.path.join(base_dir, f"{zarr_id}.zarr")
     meta_path = os.path.join(base_dir, f"{zarr_id}_metadata.json")
 
@@ -310,7 +338,9 @@ async def download_bc(zarr_id: str):
     """
     Downloads the processed CF-compliant Zarr array as a ZIP file.
     """
-    base_dir = os.path.expanduser("~/.cache/coastal-sim-data")
+    base_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
     zarr_dir = os.path.join(base_dir, f"{zarr_id}.zarr")
 
     if not os.path.exists(zarr_dir):
@@ -348,7 +378,9 @@ async def generate_ic(request: ICRequest) -> Dict[str, Any]:
     md5_hash = hashlib.md5(hash_str.encode()).hexdigest()[:12]
     zarr_id = f"ic_{md5_hash}"
 
-    base_dir = os.path.expanduser("~/.cache/coastal-sim-data")
+    base_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
     zarr_path = os.path.join(base_dir, f"{zarr_id}.zarr")
     meta_path = os.path.join(base_dir, f"{zarr_id}_metadata.json")
 
@@ -401,7 +433,9 @@ async def download_ic(zarr_id: str):
     """
     Downloads the processed CF-compliant IC Zarr array as a ZIP file.
     """
-    base_dir = os.path.expanduser("~/.cache/coastal-sim-data")
+    base_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
     zarr_dir = os.path.join(base_dir, f"{zarr_id}.zarr")
 
     if not os.path.exists(zarr_dir):

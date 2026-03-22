@@ -11,7 +11,13 @@ def fetch_noaa_tide_data(
     station_id: str,
     start_time: str,
     end_time: str,
-    cache_dir: str = os.path.expanduser("~/.cache/coastal-sim-data/noaa"),
+    cache_dir: str = os.path.join(
+        os.environ.get(
+            "COASTAL_SIM_DATA_CACHE_DIR",
+            os.path.expanduser("~/.cache/coastal-sim-data"),
+        ),
+        "noaa",
+    ),
     cache_bust: bool = False,
 ) -> dict:
     """
