@@ -1,5 +1,5 @@
 document.addEventListener("DOMContentLoaded", () => {
-    console.log("Coastal Edge UI Initialized");
+    console.log("coastal-sim-data UI Initialized");
     const datasetList = document.getElementById("datasetList");
     const datasetCount = document.getElementById("datasetCount");
     const refreshBtn = document.getElementById("refreshBtn");
@@ -131,16 +131,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const isIC = item.id.startsWith("ic_");
             const isBC = item.id.startsWith("bc_");
-            const typeLabel = isIC ? "Initial Conditions" : (isBC || item.type === "zarr" ? "Boundary Forcing" : item.type);
-            const typeClass = isIC ? "type-ic" : (isBC ? "type-bc" : `type-${item.type}`);
+            const isGRIB = item.type === "grib" || item.type === "grib2";
+            const typeLabel = item.source || (isIC ? "Ocean IC" : (isBC ? "Boundary" : (isGRIB ? item.type.toUpperCase() : item.type)));
+            const typeClass = isIC ? "type-ic" : (isBC ? "type-bc" : (isGRIB ? "type-grib" : `type-${item.type}`));
+
+            // Build display label
+            const displayName = item.label || item.id;
+            const gridInfo = item.grid_shape ? `${item.grid_shape} grid` : '';
+            const timeInfo = item.time_steps ? `${item.time_steps} steps` : '';
+            const statsLine = [gridInfo, timeInfo].filter(Boolean).join(' \u00b7 ');
+            const varsLine = item.variables ? item.variables.join(', ') : '';
 
             card.innerHTML = `
-                <div class="card-title">${item.id}</div>
+                <div class="card-title">${displayName}</div>
                 <div class="card-meta">
                     <span class="type-tag ${typeClass}">${typeLabel}</span>
                     <span>${item.size_mb} MB</span>
                     <span>${date}</span>
                 </div>
+                ${statsLine ? `<div class="card-stats">${statsLine}</div>` : ''}
+                ${varsLine ? `<div class="card-vars">${varsLine}</div>` : ''}
+                ${item.spatial_extent ? `<div class="card-stats">\ud83c\udf10 ${item.spatial_extent}</div>` : ''}
+                ${item.time_range ? `<div class="card-time">\ud83d\udcc5 ${item.time_range}</div>` : ''}
             `;
 
             card.addEventListener("click", () => selectDataset(item, card));
@@ -159,22 +171,40 @@ document.addEventListener("DOMContentLoaded", () => {
         timeRange.value = 0;
         timeIdxDisplay.textContent = "0";
 
-        Array.from(varSelect.options).forEach(opt => {
-            opt.style.display = "none";
-            if (item.id.startsWith("bc_") || item.id.startsWith("hrrr") || item.id.startsWith("era5")) {
-                if (["u10", "v10", "t2m", "water_level"].includes(opt.value)) opt.style.display = "";
-            }
-            if (item.id.startsWith("ic_") || item.id.includes("hycom") || item.id.includes("nyhops") || item.id.includes("maracoos")) {
-                if (["u", "v", "temp", "salt", "zeta", "water_u", "water_v", "hs"].includes(opt.value)) {
-                    opt.style.display = "";
-                }
-            }
-        });
+        // Set time slider max from metadata
+        if (item.time_steps && item.time_steps > 0) {
+            timeRange.max = item.time_steps - 1;
+            timeIdxDisplay.textContent = `0 (${item.time_steps})`;
+        } else {
+            timeRange.max = 48;
+        }
 
-        for (let opt of varSelect.options) {
-            if (opt.style.display !== "none") {
-                varSelect.value = opt.value;
-                break;
+        // Populate variable dropdown from metadata if available
+        if (item.variables && item.variables.length > 0) {
+            varSelect.innerHTML = '';
+            item.variables.forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v;
+                opt.textContent = v;
+                varSelect.appendChild(opt);
+            });
+            // Default to water_level or first variable
+            const preferred = ['water_level', 'u10', 'zeta', 'temp'];
+            const defaultVar = preferred.find(p => item.variables.includes(p)) || item.variables[0];
+            varSelect.value = defaultVar;
+        } else {
+            // Fallback: show/hide hardcoded options
+            Array.from(varSelect.options).forEach(opt => {
+                opt.style.display = "none";
+                if (item.id.startsWith("bc_") || item.id.startsWith("hrrr") || item.id.startsWith("era5")) {
+                    if (["u10", "v10", "t2m", "water_level"].includes(opt.value)) opt.style.display = "";
+                }
+                if (item.id.startsWith("ic_") || item.id.includes("hycom") || item.id.includes("nyhops") || item.id.includes("maracoos")) {
+                    if (["u", "v", "temp", "salt", "zeta", "water_u", "water_v", "hs"].includes(opt.value)) opt.style.display = "";
+                }
+            });
+            for (let opt of varSelect.options) {
+                if (opt.style.display !== "none") { varSelect.value = opt.value; break; }
             }
         }
 
@@ -184,7 +214,8 @@ document.addEventListener("DOMContentLoaded", () => {
     varSelect.addEventListener("change", updatePreview);
 
     timeRange.addEventListener("input", (e) => {
-        timeIdxDisplay.textContent = e.target.value;
+        const total = selectedDataset?.time_steps || '?';
+        timeIdxDisplay.textContent = `${e.target.value} (${total})`;
         clearTimeout(previewDebounce);
         previewDebounce = setTimeout(updatePreview, 300);
     });

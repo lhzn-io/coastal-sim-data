@@ -128,14 +128,38 @@ def fetch_neracoos_initial_conditions(
             )
         else:
             # Curvilinear 2D grid
-            logger.info("Masking curvilinear 2D NERACOOS grid...")
+            logger.info("Slicing curvilinear 2D NERACOOS grid via index bounds...")
+            import numpy as np
+
             mask = (
-                (ds_t[lon_var] >= min_lon)
-                & (ds_t[lon_var] <= max_lon)
-                & (ds_t[lat_var] >= min_lat)
-                & (ds_t[lat_var] <= max_lat)
+                (
+                    (ds_t[lon_var] >= min_lon)
+                    & (ds_t[lon_var] <= max_lon)
+                    & (ds_t[lat_var] >= min_lat)
+                    & (ds_t[lat_var] <= max_lat)
+                )
+                .compute()
+                .values
             )
-            ds_subset = ds_t.where(mask, drop=True)
+
+            # Find index bounds where mask is true
+            if not mask.any():
+                logger.error("Bounding box mask is entirely empty for this dataset.")
+                return None
+
+            y_indices, x_indices = np.where(mask)
+            y_min, y_max = y_indices.min(), y_indices.max()
+            x_min, x_max = x_indices.min(), x_indices.max()
+
+            # ROMS grids use eta_rho, xi_rho (and eta_u, xi_v etc). We slice all related dimensions safely
+            slice_dict = {}
+            for dim in ds_t.dims:
+                if "eta" in str(dim) or "y" in str(dim):
+                    slice_dict[dim] = slice(y_min, y_max)
+                elif "xi" in str(dim) or "x" in str(dim):
+                    slice_dict[dim] = slice(x_min, x_max)
+
+            ds_subset = ds_t.isel(slice_dict)
 
         # Extract the core state - NWPS is a wave/surge model so variables might be 'u', 'v', 'zeta' or wave components
         target_vars = [

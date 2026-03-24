@@ -101,17 +101,19 @@ def process_and_regrid_grib(
                 water_level=(["time"], h_vals),
             ),
             coords=dict(
-                time=t_vals,
+                time=("time", pd.to_datetime(t_vals).values.astype("datetime64[us]")),
             ),
         )
 
-        # If the HRRR/ERA5 dataset has a 'time' dimension, we can interpolate
-        # the tide data to match the meteorological time steps for simplicity.
-        # Alternatively, we just add it as a separate variable and let Julia
-        # handle the multi-rate interpolation. Julia's Zarr.jl handles this fine.
+        # Cast the meteorological time coordinate to microseconds to match
+        # and prevent xarray extrapolation bounds from exploding due to ns vs s type discrepancies.
+        ds_cropped = ds_cropped.assign_coords(
+            time=ds_cropped.time.astype("datetime64[us]")
+        )
 
         # We'll interpolate for the MVP to ensure a consistent 'time' dimension
         # broadcastable to (time, lat, lon) if needed (though water_level is spaital uniform here).
+        # We use fill_value="nearest" or omit extrapolate to prevent runaway tsunami gradients
         tide_interp = tide_ds.interp(
             time=ds_cropped.time, method="linear", kwargs={"fill_value": "extrapolate"}
         )

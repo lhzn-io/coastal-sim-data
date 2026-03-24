@@ -306,6 +306,32 @@ h3 {
     color: #58a6ff;
 }
 
+.type-bc {
+    background: rgba(46, 229, 157, 0.15);
+    color: #2ee59d;
+}
+
+.card-stats {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+.card-vars {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-top: 2px;
+    font-family: monospace;
+    opacity: 0.7;
+}
+
+.card-time {
+    font-size: 0.7rem;
+    color: var(--accent);
+    margin-top: 2px;
+    opacity: 0.8;
+}
+
 /* Preview Panel */
 .preview-panel {
     display: flex;

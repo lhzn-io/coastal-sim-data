@@ -60,8 +60,8 @@ logger = logging.getLogger("coastal_data_serve")
 
 # Initialize FastAPI application
 app = FastAPI(
-    title="CoastalSim Data Ingestor",
-    description="Microservice for fetching, parsing, and regridding ERA5/HRRR forcing data for Coastal Edge.",
+    title="coastal-sim-data",
+    description="Microservice for fetching, parsing, and regridding ERA5/HRRR forcing data for coastal-sim.",
     version="1.0.0",
     openapi_tags=[
         {
