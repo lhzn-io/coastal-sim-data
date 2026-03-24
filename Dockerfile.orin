@@ -1,0 +1,35 @@
+ARG BASE_IMAGE=ghcr.io/dusty-nv/python:r36.2.0
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+# Install system dev dependencies
+# Note: dusty-nv images already have many dev tools, but we make sure.
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    libeccodes-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="/usr/local/bin" sh
+
+# Configure environment
+# On Jetson, we might want to use the system site-packages for some heavy libs (like numpy)
+# but for now we'll try uv's isolation.
+ENV UV_PROJECT_ENVIRONMENT="/usr/local" \
+    PYTHONPATH="/app/src:/app/service"
+
+COPY pyproject.toml uv.lock ./
+COPY README.md ./
+COPY src/ /app/src/
+COPY service/ /app/service/
+
+# Downgrade python was done in pyproject.toml. 
+# We use --frozen to respect uv.lock
+RUN uv sync --frozen --no-dev --compile-bytecode
+
+# Default port 9598
+EXPOSE 9598
+
+CMD ["uv", "run", "python", "-m", "coastal_data_serve.main", "--host", "0.0.0.0", "--port", "9598"]
