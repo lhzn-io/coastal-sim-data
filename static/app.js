@@ -15,6 +15,8 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentInventory = [];
     let selectedDataset = null;
     let previewDebounce = null;
+    let mode3d = false;
+    const vectorPairs = [["u", "v"], ["water_u", "water_v"], ["u10", "v10"]];
 
     // Initialize View
     fetchInventory().then(() => {
@@ -171,12 +173,31 @@ document.addEventListener("DOMContentLoaded", () => {
         timeRange.value = 0;
         timeIdxDisplay.textContent = "0";
 
-        // Set time slider max from metadata
-        if (item.time_steps && item.time_steps > 0) {
+        // Set time slider max from metadata; hide for single-snapshot datasets (e.g. ICs)
+        const timeSliderGroup = document.getElementById("timeSliderGroup");
+        const snapshotLabel = document.getElementById("snapshotLabel");
+        const snapshotLabelText = document.getElementById("snapshotLabelText");
+        if (item.time_steps && item.time_steps > 1) {
             timeRange.max = item.time_steps - 1;
             timeIdxDisplay.textContent = `0 (${item.time_steps})`;
+            if (timeSliderGroup) timeSliderGroup.style.display = "";
+            if (snapshotLabel) snapshotLabel.style.display = "none";
         } else {
-            timeRange.max = 48;
+            timeRange.max = 0;
+            timeRange.value = 0;
+            if (timeSliderGroup) timeSliderGroup.style.display = "none";
+            // Show snapshot timestamp from target_date if available
+            if (snapshotLabel && snapshotLabelText && item.target_date) {
+                try {
+                    const d = new Date(item.target_date);
+                    snapshotLabelText.textContent = `Snapshot: ${d.toUTCString().replace('GMT', 'UTC')}`;
+                } catch (_) {
+                    snapshotLabelText.textContent = `Snapshot: ${item.target_date}`;
+                }
+                snapshotLabel.style.display = "";
+            } else if (snapshotLabel) {
+                snapshotLabel.style.display = "none";
+            }
         }
 
         // Populate variable dropdown from metadata if available
@@ -188,8 +209,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 opt.textContent = v;
                 varSelect.appendChild(opt);
             });
-            // Default to water_level or first variable
-            const preferred = ['water_level', 'u10', 'zeta', 'temp'];
+            // Default to a vector variable for IC datasets so 3D auto-triggers
+            const isIC = item.id.startsWith('ic_');
+            const preferred = isIC
+                ? ['u', 'water_u', 'u10', 'zeta', 'temp']
+                : ['water_level', 'u10', 'zeta', 'temp'];
             const defaultVar = preferred.find(p => item.variables.includes(p)) || item.variables[0];
             varSelect.value = defaultVar;
         } else {
@@ -208,6 +232,8 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
 
+        if (window.preview3d) window.preview3d.hide();
+
         updatePreview();
     }
 
@@ -223,6 +249,39 @@ document.addEventListener("DOMContentLoaded", () => {
     async function updatePreview() {
         if (!selectedDataset) return;
 
+        const t = timeRange.value;
+        const id = selectedDataset.id;
+
+        // Determine mode from selected variable: 3D if it's part of a u/v pair
+        const selectedVar = varSelect.value;
+        mode3d = selectedDataset.type === 'zarr' &&
+            vectorPairs.some(([u, v]) => (selectedVar === u || selectedVar === v) &&
+                selectedDataset.variables?.includes(u) && selectedDataset.variables?.includes(v));
+
+        // ── 3D Vector Mode ──
+        if (mode3d && window.preview3d) {
+            // Hide 2D content, show 3D canvas
+            const img = document.getElementById("renderedMap");
+            if (img) img.style.display = 'none';
+            // Clear empty-state divs
+            const emptyState = previewCanvas.querySelector('.empty-state');
+            if (emptyState) emptyState.style.display = 'none';
+
+            window.preview3d.show(previewCanvas);
+
+            try {
+                const info = await window.preview3d.load(id, parseInt(t));
+                console.log(`3D preview: ${info.count} vectors (${info.u_var}/${info.v_var}), ${info.depths} depth levels`);
+            } catch (err) {
+                console.error("3D preview failed:", err);
+                // Fall through — keep the canvas visible with whatever was there
+            }
+            return;
+        }
+
+        // ── 2D Matplotlib Mode ──
+        if (window.preview3d) window.preview3d.hide();
+
         let loader = document.querySelector(".preview-loader");
         if (!loader) {
             loader = document.createElement("div");
@@ -232,9 +291,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         const v = varSelect.value;
-        const t = timeRange.value;
         const ext = selectedDataset.type;
-        const id = selectedDataset.id;
 
         const url = `/api/v1/cache/preview?dataset_id=${encodeURIComponent(id)}&ext=${ext}&var_name=${v}&time_idx=${t}`;
         console.log("Fetching preview:", url);
@@ -257,6 +314,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 img.className = "preview-image";
                 previewCanvas.appendChild(img);
             }
+            img.style.display = '';
 
             img.onload = () => {
                 img.classList.add("loaded");

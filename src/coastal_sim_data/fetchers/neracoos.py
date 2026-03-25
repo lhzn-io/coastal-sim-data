@@ -183,7 +183,18 @@ def fetch_neracoos_initial_conditions(
             )
             return None
 
-        ds_subset = ds_subset[keep_vars]
+        # Fix broadcasting bug by explicitly detaching coordinates from variables
+        # that don't share identical foundational dimensions.
+        clean_vars = {}
+        for var in keep_vars:
+            da = ds_subset[var]
+            coords = list(da.coords.keys())
+            mismatched = [
+                c for c in coords if not set(da.coords[c].dims).issubset(set(da.dims))
+            ]
+            clean_vars[var] = da.drop_vars(mismatched)
+
+        ds_subset = __import__("xarray").Dataset(clean_vars)
 
         logger.info("Executing NERACOOS OPeNDAP download for target domain bounds...")
         ds_subset = ds_subset.compute()

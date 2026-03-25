@@ -96,26 +96,31 @@
                     </div>
 
                     <div id="previewControls" class="preview-controls hidden">
-                        <div class="control-group">
-                            <label for="varSelect">Surface Tensor</label>
-                            <select id="varSelect" class="form-select">
-                                <option value="u10">Atmospheric U-Wind (u10)</option>
-                                <option value="v10">Atmospheric V-Wind (v10)</option>
-                                <option value="t2m">Atmospheric Temp 2m (t2m)</option>
-                                <option value="u">Ocean U-Velocity (u)</option>
-                                <option value="v">Ocean V-Velocity (v)</option>
-                                <option value="water_u">Ocean U-Velocity (water_u)</option>
-                                <option value="water_v">Ocean V-Velocity (water_v)</option>
-                                <option value="temp">Ocean Temperature (temp)</option>
-                                <option value="salt">Ocean Salinity (salt)</option>
-                                <option value="zeta">Surface Elevation (zeta)</option>
-                                <option value="hs">Significant Wave Height (hs)</option>
-                                <option value="water_level">NOAA Water Level</option>
-                            </select>
+                        <div class="control-group" style="display:flex; gap:8px; align-items:end;">
+                            <div style="flex:1;">
+                                <label for="varSelect">Surface Field</label>
+                                <select id="varSelect" class="form-select">
+                                    <option value="u10">Atmospheric U-Wind (u10)</option>
+                                    <option value="v10">Atmospheric V-Wind (v10)</option>
+                                    <option value="t2m">Atmospheric Temp 2m (t2m)</option>
+                                    <option value="u">Ocean U-Velocity (u)</option>
+                                    <option value="v">Ocean V-Velocity (v)</option>
+                                    <option value="water_u">Ocean U-Velocity (water_u)</option>
+                                    <option value="water_v">Ocean V-Velocity (water_v)</option>
+                                    <option value="temp">Ocean Temperature (temp)</option>
+                                    <option value="salt">Ocean Salinity (salt)</option>
+                                    <option value="zeta">Surface Elevation (zeta)</option>
+                                    <option value="hs">Significant Wave Height (hs)</option>
+                                    <option value="water_level">NOAA Water Level</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="control-group">
+                        <div id="timeSliderGroup" class="control-group">
                             <label for="timeRange">Time Index (<span id="timeIdxDisplay">0</span>)</label>
                             <input type="range" id="timeRange" min="0" max="48" value="0" class="form-range">
+                        </div>
+                        <div id="snapshotLabel" class="control-group" style="display:none;">
+                            <span style="color:#8b949e; font-size:0.85rem; font-style:italic;" id="snapshotLabelText"></span>
                         </div>
                     </div>
 
@@ -136,6 +141,10 @@
     </div>
 
     <script defer src="app.js"></script>
+    <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+    </script>
+    <script type="module" src="preview3d.js"></script>
 </body>
 
 </html>
