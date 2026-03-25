@@ -12,6 +12,7 @@ def get_metadata() -> dict:
         "name": "MARACOOS Rutgers DOPPIO",
         "resolution_approx_m": 7000.0,
         "type_desc": "ROMS structured grid",
+        "domain_bbox": [-77.0, 35.0, -65.0, 46.0],
     }
 
 

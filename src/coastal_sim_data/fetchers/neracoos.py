@@ -14,6 +14,7 @@ def get_metadata() -> dict:
         "name": "NERACOOS NWPS",
         "resolution_approx_m": 1000.0,
         "type_desc": "Regular grid",
+        "domain_bbox": [-71.5, 42.0, -69.0, 44.5],
     }
 
 

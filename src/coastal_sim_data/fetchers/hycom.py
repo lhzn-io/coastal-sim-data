@@ -12,6 +12,7 @@ def get_metadata() -> dict:
         "name": "HYCOM Global",
         "resolution_approx_m": 9000.0,
         "type_desc": "Global regular grid",
+        "domain_bbox": [-180.0, -90.0, 180.0, 90.0],
     }
 
 

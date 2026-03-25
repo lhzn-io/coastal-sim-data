@@ -150,10 +150,17 @@ def dispatch_forcing_request(
 
 
 def get_ic_fetchers():
-    # Return available fetchers in priority order (high res -> low res)
-    from coastal_sim_data.fetchers import necofs, neracoos, maracoos, hycom
+    """Return all registered IC fetcher modules and their fetch functions."""
+    from coastal_sim_data.fetchers import (
+        hycom,
+        maracoos,
+        necofs,
+        neracoos,
+        nyhops,
+    )
 
     return [
+        (nyhops, nyhops.fetch_nyhops_initial_conditions),
         (necofs, necofs.fetch_necofs_initial_conditions),
         (neracoos, neracoos.fetch_neracoos_initial_conditions),
         (maracoos, maracoos.fetch_maracoos_initial_conditions),
@@ -161,11 +168,52 @@ def get_ic_fetchers():
     ]
 
 
+def _domain_area(domain_bbox: list[float]) -> float:
+    """Compute approximate domain area in degree^2 from [min_lon, min_lat, max_lon, max_lat]."""
+    return (domain_bbox[2] - domain_bbox[0]) * (domain_bbox[3] - domain_bbox[1])
+
+
+def _rank_ic_candidates(bbox: list[float]) -> list[tuple]:
+    """
+    Rank IC fetchers for a given request bbox using spatial heuristics.
+
+    Scoring strategy (smallest-enclosing-domain first, resolution tiebreak):
+      1. Filter to models whose domain contains the request bbox.
+      2. Sort by domain area ascending — the tightest enclosing domain is most
+         likely purpose-built for the region (e.g. NYHOPS for NY harbor).
+      3. Tiebreak by resolution_approx_m ascending (finer resolution wins).
+
+    Returns an ordered list of (module, fetch_func, metadata) tuples.
+    """
+    candidates = []
+    for module, fetch_func in get_ic_fetchers():
+        if not module.supports_bbox(bbox):
+            continue
+        meta = module.get_metadata()
+        domain_bbox = meta.get("domain_bbox")
+        area = _domain_area(domain_bbox) if domain_bbox else float("inf")
+        resolution = meta.get("resolution_approx_m", float("inf"))
+        candidates.append((area, resolution, module, fetch_func, meta))
+
+    # Sort: smallest domain first, then finest resolution
+    candidates.sort(key=lambda c: (c[0], c[1]))
+
+    ranked = [(c[2], c[3], c[4]) for c in candidates]
+    if ranked:
+        logger.info(
+            f"IC donor ranking for bbox {bbox}: "
+            + " > ".join(
+                f"{c[4]['name']} (area={c[0]:.1f}°², ~{c[1]:.0f}m)" for c in candidates
+            )
+        )
+    return ranked
+
+
 def predict_ic_donor(bbox: list[float]) -> dict:
     """Predicts which model will be used for a given bounding box."""
-    for module, _ in get_ic_fetchers():
-        if module.supports_bbox(bbox):
-            return module.get_metadata()
+    ranked = _rank_ic_candidates(bbox)
+    if ranked:
+        return ranked[0][2]
     return {}
 
 
@@ -192,19 +240,11 @@ def dispatch_ic_request(
         logger.info(f"Cache hit for IC: {zarr_path}")
         return zarr_path
 
-    target_module = None
-    target_fetch_func = None
-
-    for module, fetch_func in get_ic_fetchers():
-        if module.supports_bbox(bbox):
-            target_module = module
-            target_fetch_func = fetch_func
-            break
-
-    if not target_module or target_fetch_func is None:
+    ranked = _rank_ic_candidates(bbox)
+    if not ranked:
         raise ValueError(f"No suitable IC fetcher found for bbox {bbox}")
 
-    meta = target_module.get_metadata()
+    target_module, target_fetch_func, meta = ranked[0]
     logger.info(f"Selected primary IC Donor: {meta['name']}")
 
     try:

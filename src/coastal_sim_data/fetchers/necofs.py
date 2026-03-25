@@ -16,6 +16,7 @@ def get_metadata() -> dict:
         "name": "NECOFS FVCOM GOM7",
         "resolution_approx_m": 200.0,
         "type_desc": "Unstructured Triangular Mesh",
+        "domain_bbox": [-77.0, 35.0, -65.0, 46.0],
     }
 
 

@@ -12,6 +12,7 @@ def get_metadata() -> dict:
         "name": "Stevens NYHOPS",
         "resolution_approx_m": 500.0,
         "type_desc": "Curvilinear grid",
+        "domain_bbox": [-75.0, 39.0, -71.0, 42.0],
     }
 
 
