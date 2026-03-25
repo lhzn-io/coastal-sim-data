@@ -58,6 +58,8 @@ if not has_console:
 logging.getLogger("coastal_data_serve").setLevel(log_level)
 logger = logging.getLogger("coastal_data_serve")
 
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
 # Initialize FastAPI application
 app = FastAPI(
     title="coastal-sim-data",
@@ -69,6 +71,14 @@ app = FastAPI(
             "description": "Endpoints to navigate and preview static cached data.",
         }
     ],
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(viewer.router)
@@ -363,6 +373,54 @@ async def download_bc(zarr_id: str):
     )
 
 
+class TCPredictRequest(BaseModel):
+    target_date: str
+
+
+@app.post("/api/v1/bc/predict-donor")
+async def predict_bc_donor_endpoint(request: TCPredictRequest) -> Dict[str, Any]:
+    """Predicts which boundary condition donor will be used for a given target date."""
+    try:
+        from coastal_sim_data.dispatcher import predict_bc_donor
+
+        donor_meta = predict_bc_donor(request.target_date)
+        if donor_meta:
+            return {"status": "success", "donor": donor_meta}
+        else:
+            return {
+                "status": "error",
+                "message": "No donor model supports this target date.",
+            }
+    except Exception as e:
+        logger.error(f"Failed to predict BC donor: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/ic/predict-donor")
+async def predict_ic_donor_endpoint(request: ICRequest) -> Dict[str, Any]:
+    """Predicts which donor model will be used for a given bounding box."""
+    try:
+        from coastal_sim_data.dispatcher import predict_ic_donor
+
+        bbox_list = [
+            request.bbox.min_lon,
+            request.bbox.min_lat,
+            request.bbox.max_lon,
+            request.bbox.max_lat,
+        ]
+        donor_meta = predict_ic_donor(bbox_list)
+        if donor_meta:
+            return {"status": "success", "donor": donor_meta}
+        else:
+            return {
+                "status": "error",
+                "message": "No donor model supports this bounding box.",
+            }
+    except Exception as e:
+        logger.error(f"Failed to predict IC donor: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/ic/generate")
 async def generate_ic(request: ICRequest) -> Dict[str, Any]:
     """
@@ -373,8 +431,19 @@ async def generate_ic(request: ICRequest) -> Dict[str, Any]:
 
     import hashlib
     import json
+    from coastal_sim_data.dispatcher import predict_ic_donor
 
-    hash_str = f"{request.bbox.min_lon}_{request.bbox.max_lon}_{request.bbox.min_lat}_{request.bbox.max_lat}_{request.target_date}"
+    # Include predicted donor in hash so different models produce different cache keys
+    bbox_list = [
+        request.bbox.min_lon,
+        request.bbox.min_lat,
+        request.bbox.max_lon,
+        request.bbox.max_lat,
+    ]
+    donor_meta = predict_ic_donor(bbox_list)
+    donor_id = donor_meta["id"] if donor_meta else "unknown"
+
+    hash_str = f"{request.bbox.min_lon}_{request.bbox.max_lon}_{request.bbox.min_lat}_{request.bbox.max_lat}_{request.target_date}_{donor_id}"
     md5_hash = hashlib.md5(hash_str.encode()).hexdigest()[:12]
     zarr_id = f"ic_{md5_hash}"
 
@@ -396,14 +465,6 @@ async def generate_ic(request: ICRequest) -> Dict[str, Any]:
         }
 
     try:
-        # Note: dispatch_ic_request explicitly expects [min_lon, min_lat, max_lon, max_lat]
-        bbox_list = [
-            request.bbox.min_lon,
-            request.bbox.min_lat,
-            request.bbox.max_lon,
-            request.bbox.max_lat,
-        ]
-
         from coastal_sim_data.dispatcher import dispatch_ic_request
 
         _ = dispatch_ic_request(

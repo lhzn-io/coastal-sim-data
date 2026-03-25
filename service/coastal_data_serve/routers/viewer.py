@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response as FastAPIResponse
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import List
@@ -25,6 +25,8 @@ class CacheItem(BaseModel):
     time_steps: int | None = None  # Number of time steps
     time_range: str | None = None  # e.g. "Mar 2 00:00 → Mar 3 23:00"
     source: str | None = None  # e.g. "ERA5", "HRRR", "NOAA Water Level"
+    donor_model: str | None = None  # e.g. "HYCOM", "NERACOOS", "NECOFS"
+    resolution: str | None = None  # e.g. "~7km", "~200m", "~31km"
     spatial_extent: str | None = None  # e.g. "-71.25, 42.75 → -70.25, 43.50"
     target_date: str | None = None  # ISO timestamp from sidecar metadata (e.g. ICs)
 
@@ -40,26 +42,82 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
             ds = xr.open_zarr(str(zarr_path), consolidated=False, decode_times=True)
         except Exception:
             ds = xr.open_zarr(str(zarr_path), consolidated=False, decode_times=False)
-        variables = list(ds.data_vars.keys())
+        # Filter out scalar (0-d) variables — these are GRIB metadata artifacts
+        variables = [v for v in ds.data_vars if ds[v].ndim > 0]
 
-        # Grid shape and spatial extent from coordinate arrays
+        # Grid shape, spatial extent, and resolution from coordinate arrays
         lat_dim = next((d for d in ["latitude", "lat", "y"] if d in ds.sizes), None)
         lon_dim = next((d for d in ["longitude", "lon", "x"] if d in ds.sizes), None)
+        # Also check for curvilinear ROMS grids (lat_rho/lon_rho are coords, not dims)
+        lat_coord = lat_dim
+        lon_coord = lon_dim
+        if not lat_coord:
+            lat_coord = next(
+                (c for c in ["lat_rho", "latitude", "lat"] if c in ds.coords), None
+            )
+        if not lon_coord:
+            lon_coord = next(
+                (c for c in ["lon_rho", "longitude", "lon"] if c in ds.coords), None
+            )
+
         spatial_extent = None
+        resolution = None
         if lat_dim and lon_dim:
             nlat, nlon = ds.sizes[lat_dim], ds.sizes[lon_dim]
             grid_shape = f"{nlat}\u00d7{nlon}" if nlat > 0 and nlon > 0 else "point"
-            # Extract coordinate bounds for spatial extent
-            if lat_dim in ds.coords and lon_dim in ds.coords:
-                lat_vals = ds[lat_dim].values
-                lon_vals = ds[lon_dim].values
-                if len(lat_vals) > 0 and len(lon_vals) > 0:
-                    spatial_extent = (
-                        f"{float(np.min(lon_vals)):.2f}, {float(np.min(lat_vals)):.2f}"
-                        f" \u2192 {float(np.max(lon_vals)):.2f}, {float(np.max(lat_vals)):.2f}"
-                    )
+        elif lat_coord and lon_coord and lat_coord in ds.coords:
+            # Curvilinear: infer shape from coord arrays
+            lat_arr = ds[lat_coord].values
+            nlat = lat_arr.shape[0] if lat_arr.ndim >= 1 else 0
+            nlon = (
+                lat_arr.shape[1]
+                if lat_arr.ndim >= 2
+                else (lat_arr.shape[0] if lat_arr.ndim == 1 else 0)
+            )
+            grid_shape = f"{nlat}\u00d7{nlon}" if nlat > 0 and nlon > 0 else "point"
         else:
+            nlat = nlon = 0
             grid_shape = "point"
+
+        # Extract coordinate bounds for spatial extent and resolution
+        if (
+            lat_coord
+            and lon_coord
+            and lat_coord in ds.coords
+            and lon_coord in ds.coords
+        ):
+            lat_vals = ds[lat_coord].values
+            lon_vals = ds[lon_coord].values
+            if lat_vals.size > 0 and lon_vals.size > 0:
+                spatial_extent = (
+                    f"{float(np.min(lon_vals)):.2f}, {float(np.min(lat_vals)):.2f}"
+                    f" \u2192 {float(np.max(lon_vals)):.2f}, {float(np.max(lat_vals)):.2f}"
+                )
+                # Compute median grid spacing in meters
+                try:
+                    if lat_vals.ndim == 1 and len(lat_vals) > 1:
+                        dlat = float(np.median(np.abs(np.diff(lat_vals))))
+                        dlon = float(np.median(np.abs(np.diff(lon_vals))))
+                    elif (
+                        lat_vals.ndim == 2
+                        and lat_vals.shape[0] > 1
+                        and lat_vals.shape[1] > 1
+                    ):
+                        dlat = float(np.median(np.abs(np.diff(lat_vals, axis=0))))
+                        dlon = float(np.median(np.abs(np.diff(lon_vals, axis=1))))
+                    else:
+                        dlat = dlon = 0
+                    if dlat > 0 or dlon > 0:
+                        mid_lat = float(np.mean(lat_vals))
+                        dx_m = dlon * 111_320 * np.cos(np.radians(mid_lat))
+                        dy_m = dlat * 111_320
+                        avg_m = (dx_m + dy_m) / 2
+                        if avg_m >= 1000:
+                            resolution = f"~{avg_m / 1000:.0f}km"
+                        else:
+                            resolution = f"~{avg_m:.0f}m"
+                except Exception:
+                    pass
 
         # Time info — use decoded timestamps when available
         time_dim = next(
@@ -85,18 +143,50 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
 
         # Source detection
         stem = zarr_path.stem.lower()
+        donor_model = None
         if stem.startswith("bc_"):
             # Detect source from variables present
             if "sp" in variables or "surface_pressure" in variables:
                 source = "ERA5"
+                donor_model = "ECMWF"
             elif any(v.startswith("HRRR") or "hrrr" in v for v in variables):
                 source = "HRRR"
+                donor_model = "NOAA"
             else:
-                source = "Atmos. Forcing"
+                source = "Atmospheric Forcing"
             label = f"{source} Boundary Conditions"
         elif stem.startswith("ic_"):
-            source = "Ocean IC"
+            raw_type = ds.attrs.get("type", "Ocean IC")
+            # Shorten verbose model strings (case-insensitive)
+            import re
+
+            source = re.sub(
+                r"\s+history\s+file", "", raw_type, flags=re.IGNORECASE
+            ).strip()
             label = "Initial Conditions"
+            # Extract donor model: check donor_id attr, then type/title attrs
+            donor_id = ds.attrs.get("donor_id", "")
+            title = ds.attrs.get("title", "")
+            search_text = f"{raw_type} {title} {donor_id}".lower()
+            _DONOR_MAP = {
+                "hycom": "HYCOM",
+                "neracoos": "NERACOOS",
+                "necofs": "NECOFS",
+                "maracoos": "MARACOOS",
+                "nyhops": "NYHOPS",
+            }
+            if donor_id in _DONOR_MAP:
+                donor_model = _DONOR_MAP[donor_id]
+            elif "hycom" in search_text:
+                donor_model = "HYCOM"
+            elif "necofs" in search_text or "fvcom" in search_text:
+                donor_model = "NECOFS"
+            elif "neracoos" in search_text or "nwps" in search_text:
+                donor_model = "NERACOOS"
+            elif "doppio" in search_text or "maracoos" in search_text:
+                donor_model = "MARACOOS"
+            elif "nyhops" in search_text:
+                donor_model = "NYHOPS"
         elif "hrrr" in stem:
             source = "HRRR"
             label = f"HRRR Forecast ({stem.split('_')[1] if '_' in stem else ''})"
@@ -128,6 +218,8 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
             "time_steps": time_steps,
             "time_range": time_range,
             "source": source,
+            "donor_model": donor_model,
+            "resolution": resolution,
             "spatial_extent": spatial_extent,
             "target_date": target_date,
         }
@@ -137,8 +229,9 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
 
 
 @router.get("/inventory", response_model=List[CacheItem])
-async def get_cache_inventory():
+async def get_cache_inventory(response: FastAPIResponse):
     """Crawls the local data cache and returns an inventory of all processed forcing datasets."""
+    response.headers["Cache-Control"] = "no-store"
     cache_dir = Path(
         Path(
             os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
@@ -168,9 +261,94 @@ async def get_cache_inventory():
             )
 
     # 2. Find GRIB/NC datasets (files)
-    for ext in ["*.grib", "*.grib2", "*.nc"]:
-        for file_path in cache_dir.glob(ext):
+    for ext_glob in ["*.grib", "*.grib2", "*.nc"]:
+        for file_path in cache_dir.glob(ext_glob):
             if file_path.is_file():
+                stem = file_path.stem.lower()
+                label = None
+                source = None
+                donor_model = None
+                variables = None
+                grid_shape = None
+                spatial_extent = None
+                resolution = None
+
+                if "hrrr" in stem:
+                    source = "HRRR"
+                    donor_model = "NOAA"
+                    parts = file_path.stem.split("_")
+                    date_part = parts[1] if len(parts) > 1 else ""
+                    cycle_part = parts[2].upper() if len(parts) > 2 else ""
+                    label = f"HRRR Boundary Conditions {date_part} {cycle_part}"
+                elif "era5" in stem:
+                    source = "ERA5T" if "era5t" in stem else "ERA5"
+                    donor_model = "ECMWF"
+                    label = f"{source} Boundary Conditions"
+
+                # Enrich GRIB/NC with grid and variable metadata
+                try:
+                    import xarray as xr
+                    import numpy as np
+
+                    try:
+                        gds = xr.open_dataset(
+                            str(file_path),
+                            decode_times=False,
+                            engine="cfgrib",
+                            backend_kwargs={
+                                "filter_by_keys": {"typeOfLevel": "heightAboveGround"}
+                            },
+                        )
+                    except Exception:
+                        try:
+                            gds = xr.open_dataset(str(file_path), decode_times=False)
+                        except Exception:
+                            gds = None
+
+                    if gds is not None:
+                        variables = [str(v) for v in gds.data_vars if gds[v].ndim > 0]
+                        _lat = next(
+                            (d for d in ["latitude", "lat", "y"] if d in gds.sizes),
+                            None,
+                        )
+                        _lon = next(
+                            (d for d in ["longitude", "lon", "x"] if d in gds.sizes),
+                            None,
+                        )
+                        if _lat and _lon:
+                            nlat, nlon = gds.sizes[_lat], gds.sizes[_lon]
+                            grid_shape = f"{nlat}\u00d7{nlon}"
+                            if _lat in gds.coords and _lon in gds.coords:
+                                lat_v = gds[_lat].values
+                                lon_v = gds[_lon].values
+                                if lat_v.size > 0 and lon_v.size > 0:
+                                    spatial_extent = (
+                                        f"{float(np.min(lon_v)):.2f}, {float(np.min(lat_v)):.2f}"
+                                        f" \u2192 {float(np.max(lon_v)):.2f}, {float(np.max(lat_v)):.2f}"
+                                    )
+                                    if len(lat_v) > 1:
+                                        dlat = float(np.median(np.abs(np.diff(lat_v))))
+                                        dlon = float(np.median(np.abs(np.diff(lon_v))))
+                                        mid_lat = float(np.mean(lat_v))
+                                        avg_m = (
+                                            (
+                                                dlon
+                                                * 111320
+                                                * np.cos(np.radians(mid_lat))
+                                            )
+                                            + (dlat * 111320)
+                                        ) / 2
+                                        resolution = (
+                                            f"~{avg_m / 1000:.0f}km"
+                                            if avg_m >= 1000
+                                            else f"~{avg_m:.0f}m"
+                                        )
+                        gds.close()
+                except Exception as enrich_err:
+                    logger.debug(
+                        f"GRIB enrichment failed for {file_path.name}: {enrich_err}"
+                    )
+
                 inventory.append(
                     CacheItem(
                         id=file_path.stem,
@@ -178,12 +356,49 @@ async def get_cache_inventory():
                         size_mb=round(file_path.stat().st_size / (1024 * 1024), 2),
                         modified_time=file_path.stat().st_mtime,
                         path=str(file_path),
+                        label=label,
+                        source=source,
+                        donor_model=donor_model,
+                        variables=variables,
+                        grid_shape=grid_shape,
+                        spatial_extent=spatial_extent,
+                        resolution=resolution,
                     )
                 )
 
     # Sort by descending modification time (newest first)
     inventory.sort(key=lambda x: x.modified_time, reverse=True)
     return inventory
+
+
+@router.delete("/dataset/{dataset_id}")
+async def delete_dataset(dataset_id: str):
+    """Deletes a single dataset from the cache by ID."""
+    import shutil
+
+    cache_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
+
+    # Try zarr directory first, then known file extensions
+    zarr_path = cache_dir / f"{dataset_id}.zarr"
+    if zarr_path.is_dir():
+        shutil.rmtree(zarr_path)
+        # Also remove sidecar metadata if it exists
+        sidecar = cache_dir / f"{dataset_id}_metadata.json"
+        if sidecar.exists():
+            sidecar.unlink()
+        logger.info(f"Deleted dataset: {zarr_path}")
+        return {"status": "success", "message": f"Deleted {dataset_id}"}
+
+    for ext in ["grib", "grib2", "nc"]:
+        file_path = cache_dir / f"{dataset_id}.{ext}"
+        if file_path.is_file():
+            file_path.unlink()
+            logger.info(f"Deleted dataset: {file_path}")
+            return {"status": "success", "message": f"Deleted {dataset_id}"}
+
+    raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found.")
 
 
 @router.get("/preview")
@@ -230,10 +445,16 @@ async def get_dataset_preview(
                 ds = xr.open_dataset(full_path, decode_times=True)
             except Exception as e:
                 if "multiple values for unique key" in str(e):
-                    # Try surface or heightAboveGround
-                    for filter_key in ["surface", "heightAboveGround"]:
+                    # Try common level types in priority order for surface forcing
+                    for filter_key in [
+                        "heightAboveGround",
+                        "surface",
+                        "isobaricInhPa",
+                        "meanSea",
+                        "atmosphere",
+                    ]:
                         try:
-                            ds = xr.open_dataset(
+                            candidate = xr.open_dataset(
                                 full_path,
                                 decode_times=True,
                                 engine="cfgrib",
@@ -241,25 +462,33 @@ async def get_dataset_preview(
                                     "filter_by_keys": {"typeOfLevel": filter_key}
                                 },
                             )
-                            if ds:
-                                break
+                            # Accept this filter if it contains the requested variable
+                            if var_name in candidate.data_vars or ds is None:
+                                ds = candidate
+                                if var_name in candidate.data_vars:
+                                    break
                         except Exception:
                             continue
-                if not ds:
+                if ds is None:
                     raise e
 
-        # Map common IC variable names if missing
+        # Map common variable names across naming conventions
         if var_name not in ds.variables:
-            ic_mapping = {
+            var_mapping = {
+                # Ocean IC aliases
                 "u": ["water_u", "u_current", "uo"],
                 "v": ["water_v", "v_current", "vo"],
                 "temp": ["water_temp", "temperature", "thetao"],
                 "salt": ["salinity", "so"],
                 "zeta": ["surf_el", "ssh", "zos"],
+                # Atmospheric aliases (ERA5 u10/v10 ↔ HRRR u/v at heightAboveGround)
+                "u10": ["u", "10u", "u_10m"],
+                "v10": ["v", "10v", "v_10m"],
+                "t2m": ["t", "2t", "t_2m"],
             }
-            if var_name in ic_mapping:
-                for alt_name in ic_mapping[var_name]:
-                    if alt_name in ds.variables:
+            if var_name in var_mapping:
+                for alt_name in var_mapping[var_name]:
+                    if alt_name in ds.data_vars:
                         var_name = alt_name
                         break
 
@@ -271,6 +500,12 @@ async def get_dataset_preview(
             )
 
         data_var = ds[var_name]
+
+        if data_var.ndim == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Variable '{var_name}' is scalar (0-d) and cannot be rendered.",
+            )
 
         # Detect time dimension
         time_dim = next(
@@ -286,10 +521,20 @@ async def get_dataset_preview(
 
         # Detect spatial dimensions
         lat_dim = next(
-            (d for d in ["latitude", "lat", "y"] if d in data_var.dims), None
+            (
+                d
+                for d in ["latitude", "lat", "y", "eta_rho", "eta_u", "eta_v"]
+                if d in data_var.dims
+            ),
+            None,
         )
         lon_dim = next(
-            (d for d in ["longitude", "lon", "x"] if d in data_var.dims), None
+            (
+                d
+                for d in ["longitude", "lon", "x", "xi_rho", "xi_u", "xi_v"]
+                if d in data_var.dims
+            ),
+            None,
         )
         has_spatial = (
             lat_dim
@@ -300,6 +545,7 @@ async def get_dataset_preview(
 
         # Determine rendering mode:
         # - "timeseries" for 1D time-only data or point grids (0×0 spatial)
+        # - "timeseries_grid" for very small grids (<=3×3) where overlaid timeseries are useful
         # - "heatmap_small" for small grids (<= 20 cells per dim) with annotated values
         # - "heatmap" for larger spatial grids
         nlat = ds.sizes.get(lat_dim, 0) if lat_dim else 0
@@ -307,7 +553,7 @@ async def get_dataset_preview(
 
         if not has_spatial and time_dim:
             render_mode = "timeseries"
-        elif has_spatial and nlat <= 8 and nlon <= 8 and time_dim:
+        elif has_spatial and nlat <= 3 and nlon <= 3 and time_dim:
             render_mode = "timeseries_grid"
         elif has_spatial and nlat <= 20 and nlon <= 20:
             render_mode = "heatmap_small"
@@ -439,7 +685,17 @@ async def get_dataset_preview(
             if time_dim:
                 max_t = ds.sizes[time_dim] - 1
                 slice_opts[time_dim] = min(time_idx, max_t)
-            for z_name in ["depth", "zC", "level", "s_rho", "s_w", "isobaricInhPa"]:
+            for z_name in [
+                "depth",
+                "zC",
+                "level",
+                "s_rho",
+                "s_w",
+                "isobaricInhPa",
+                "number",
+                "surface",
+                "step",
+            ]:
                 if z_name in data_var.dims:
                     slice_opts[z_name] = -1 if z_name in ("s_rho", "s_w") else 0
             valid_opts = {k: v for k, v in slice_opts.items() if k in data_var.dims}
@@ -478,7 +734,17 @@ async def get_dataset_preview(
             if time_dim:
                 max_t = ds.sizes[time_dim] - 1
                 slice_opts[time_dim] = min(time_idx, max_t)
-            for z_name in ["depth", "zC", "level", "s_rho", "s_w", "isobaricInhPa"]:
+            for z_name in [
+                "depth",
+                "zC",
+                "level",
+                "s_rho",
+                "s_w",
+                "isobaricInhPa",
+                "number",
+                "surface",
+                "step",
+            ]:
                 if z_name in data_var.dims:
                     slice_opts[z_name] = -1 if z_name in ("s_rho", "s_w") else 0
             valid_opts = {k: v for k, v in slice_opts.items() if k in data_var.dims}
@@ -572,7 +838,7 @@ async def get_dataset_preview_3d(
         # don't accidentally pick up a rho-grid coord for a u-grid variable.
         def _find_coord(da, candidates):
             for n in candidates:
-                if n in ds.coords and set(ds[n].dims).issubset(set(da.dims)):
+                if n in ds.variables and set(ds[n].dims).issubset(set(da.dims)):
                     return n
             return None
 
@@ -590,7 +856,7 @@ async def get_dataset_preview_3d(
             if lon_cname is None:
                 return da
             spatial = set(ds[lon_cname].dims)
-            if lat_cname and lat_cname in ds.coords:
+            if lat_cname and lat_cname in ds.variables:
                 spatial |= set(ds[lat_cname].dims)
             keep = spatial | ({depth_name} if depth_name else set())
             extra = [d for d in da.dims if d not in keep]
@@ -678,6 +944,8 @@ async def get_dataset_preview_3d(
                 for ix in range(0, nx, step):
                     u_val = float(u_arr[iy, ix])
                     v_val = _v(None, iy, ix)
+                    if np.isnan(u_val) or np.isnan(v_val):
+                        continue
                     if abs(u_val) < 1e-10 and abs(v_val) < 1e-10:
                         continue
                     vectors.append(
@@ -692,19 +960,30 @@ async def get_dataset_preview_3d(
         elif u_arr.ndim == 3:
             # 3D: (depth, lat, lon) or (s_rho, eta, xi)
             nz, ny, nx = u_arr.shape
-            z_step = max(1, nz // 5)
+            z_step = max(1, nz // 8)  # ~8 depth slices like hydro viewer
             xy_step = max(
                 1, int(np.sqrt(ny * nx / (max_vectors // max(1, nz // z_step))))
             )
             for iz in range(0, nz, z_step):
-                d = float(depths[iz]) if iz < len(depths) else float(iz)
-                # Map s_rho (-1 to 0) to physical depth
-                if depth_name == "s_rho" and -1.5 < d < 0.5:
-                    d = d * 50.0  # approximate 50m water column
+                d_raw = float(depths[iz]) if iz < len(depths) else float(iz)
+                # Map s_rho (-1 to 0) to physical depth in meters
+                if depth_name == "s_rho" and -1.5 < d_raw < 0.5:
+                    depth_frac = float(np.clip(-d_raw, 0, 1))
+                    d = d_raw * 50.0  # approximate 50m water column
+                else:
+                    # For regular depth coords, compute frac from min/max
+                    d = d_raw
+                    d_min = float(np.min(depths))
+                    d_max = float(np.max(depths))
+                    d_range = abs(d_max - d_min) if d_max != d_min else 1.0
+                    depth_frac = float(np.clip(abs(d - d_min) / d_range, 0, 1))
+
                 for iy in range(0, ny, xy_step):
                     for ix in range(0, nx, xy_step):
                         u_val = float(u_arr[iz, iy, ix])
                         v_val = _v(iz, iy, ix)
+                        if np.isnan(u_val) or np.isnan(v_val):
+                            continue
                         if abs(u_val) < 1e-10 and abs(v_val) < 1e-10:
                             continue
                         vectors.append(
@@ -712,6 +991,7 @@ async def get_dataset_preview_3d(
                                 "lon": _lon(iy, ix),
                                 "lat": _lat(iy, ix),
                                 "depth": d,
+                                "depth_frac": depth_frac,
                                 "u": u_val,
                                 "v": v_val,
                             }

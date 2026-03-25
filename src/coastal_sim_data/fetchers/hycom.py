@@ -6,6 +6,19 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def get_metadata() -> dict:
+    return {
+        "id": "hycom",
+        "name": "HYCOM Global",
+        "resolution_approx_m": 9000.0,
+        "type_desc": "Global regular grid",
+    }
+
+
+def supports_bbox(bbox: list[float]) -> bool:
+    return True
+
+
 def fetch_hycom_initial_conditions(
     target_date: str,
     bbox: list[float],
@@ -45,7 +58,11 @@ def fetch_hycom_initial_conditions(
         # Open lazily. HYCOM THREDDS handles slice optimizations very well because coords are 1D.
         # We use pydap because netcdf4's C-bindings hang on massive global coordinate grids via HTTP
         # decode_times=False prevents "hours since analysis" errors on non-compliant forecast variables
-        ds = xr.open_dataset(dataset_url, engine="pydap", decode_times=False)
+        # pydap expects dap2:// or dap4:// instead of http:// or https://
+        dap_url = dataset_url.replace("https://", "dap2://").replace(
+            "http://", "dap2://"
+        )
+        ds = xr.open_dataset(dap_url, engine="pydap", decode_times=False)
 
         # HYCOM natively maps variables:
         # water_u, water_v, water_temp, salinity

@@ -6,6 +6,23 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def get_metadata() -> dict:
+    return {
+        "id": "nyhops",
+        "name": "Stevens NYHOPS",
+        "resolution_approx_m": 500.0,
+        "type_desc": "Curvilinear grid",
+    }
+
+
+def supports_bbox(bbox: list[float]) -> bool:
+    min_lon, min_lat, max_lon, max_lat = bbox
+    # Nyhops coverage rough approx
+    if max_lat < 39.0 or min_lat > 42.0 or max_lon < -75.0 or min_lon > -71.0:
+        return False
+    return True
+
+
 def fetch_nyhops_initial_conditions(
     target_date: str,
     bbox: list[float],
@@ -53,7 +70,11 @@ def fetch_nyhops_initial_conditions(
 
     try:
         # Open the dataset lazily with pydap (netcdf4 C-bindings can hang on OPeNDAP coords)
-        ds = xr.open_dataset(dataset_url, engine="pydap")
+        # pydap expects dap2:// or dap4:// instead of http:// or https://
+        dap_url = dataset_url.replace("https://", "dap2://").replace(
+            "http://", "dap2://"
+        )
+        ds = xr.open_dataset(dap_url, engine="pydap")
 
         # NYHOPS native variables:
         # u (eastward_sea_water_velocity), v (northward_sea_water_velocity)

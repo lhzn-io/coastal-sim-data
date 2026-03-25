@@ -9,6 +9,51 @@ from coastal_sim_data.fetchers.hrrr import fetch_hrrr_surface_forcing
 logger = logging.getLogger(__name__)
 
 
+def predict_bc_donor(target_date: str) -> dict:
+    """Predicts the boundary condition (forcing) donor based on target date delta."""
+    from datetime import datetime, timezone
+
+    # Parse target date
+    try:
+        if "T" in target_date:
+            from dateutil import parser  # type: ignore[import-untyped]
+
+            target_dt = parser.parse(target_date)
+            if target_dt.tzinfo is None:
+                target_dt = target_dt.replace(tzinfo=timezone.utc)
+        else:
+            target_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
+    except Exception:
+        return {"name": "Unknown (Invalid Date)", "resolution_approx_m": 0}
+
+    now = datetime.now(timezone.utc)
+    delta_days = (now - target_dt).days
+    delta_hours = (now - target_dt).total_seconds() / 3600.0
+
+    if delta_hours < 48 and delta_hours >= -24:
+        return {"name": "HRRR (NOAA)", "resolution_approx_m": 3000, "tier": "IV"}
+    elif delta_days > 90:
+        return {
+            "name": "ERA5 Final (ECMWF CDS)",
+            "resolution_approx_m": 31000,
+            "tier": "I",
+        }
+    elif delta_days >= 5 and delta_days <= 90:
+        return {
+            "name": "ERA5T Preliminary (ECMWF CDS)",
+            "resolution_approx_m": 31000,
+            "tier": "II",
+        }
+    else:
+        return {
+            "name": "ERA5T Fallback (ECMWF CDS)",
+            "resolution_approx_m": 31000,
+            "tier": "III",
+        }
+
+
 def dispatch_forcing_request(
     target_date: str,
     bbox: list[float],
@@ -104,6 +149,26 @@ def dispatch_forcing_request(
         )
 
 
+def get_ic_fetchers():
+    # Return available fetchers in priority order (high res -> low res)
+    from coastal_sim_data.fetchers import necofs, neracoos, maracoos, hycom
+
+    return [
+        (necofs, necofs.fetch_necofs_initial_conditions),
+        (neracoos, neracoos.fetch_neracoos_initial_conditions),
+        (maracoos, maracoos.fetch_maracoos_initial_conditions),
+        (hycom, hycom.fetch_hycom_initial_conditions),
+    ]
+
+
+def predict_ic_donor(bbox: list[float]) -> dict:
+    """Predicts which model will be used for a given bounding box."""
+    for module, _ in get_ic_fetchers():
+        if module.supports_bbox(bbox):
+            return module.get_metadata()
+    return {}
+
+
 def dispatch_ic_request(
     target_date: str,
     bbox: list[float],
@@ -127,37 +192,40 @@ def dispatch_ic_request(
         logger.info(f"Cache hit for IC: {zarr_path}")
         return zarr_path
 
-    ds = None
+    target_module = None
+    target_fetch_func = None
 
-    from coastal_sim_data.fetchers.neracoos import fetch_neracoos_initial_conditions
-    from coastal_sim_data.fetchers.maracoos import fetch_maracoos_initial_conditions
-    from coastal_sim_data.fetchers.hycom import fetch_hycom_initial_conditions
+    for module, fetch_func in get_ic_fetchers():
+        if module.supports_bbox(bbox):
+            target_module = module
+            target_fetch_func = fetch_func
+            break
 
-    # 1. Try NERACOOS (NH/Piscataqua)
+    if not target_module or target_fetch_func is None:
+        raise ValueError(f"No suitable IC fetcher found for bbox {bbox}")
+
+    meta = target_module.get_metadata()
+    logger.info(f"Selected primary IC Donor: {meta['name']}")
+
     try:
-        ds = fetch_neracoos_initial_conditions(target_date, bbox)
+        ds = target_fetch_func(target_date, bbox)
     except Exception as e:
-        logger.error(f"NERACOOS fetch failed: {e}")
-
-    # 2. Try MARACOOS (NY/NJ/LIS)
-    if ds is None:
-        try:
-            ds = fetch_maracoos_initial_conditions(target_date, bbox)
-        except Exception as e:
-            logger.error(f"MARACOOS fetch failed: {e}")
-
-    # 3. Fallback to HYCOM
-    if ds is None:
-        logger.info("Regional models failed or out of bounds. Falling back to HYCOM.")
-        try:
-            ds = fetch_hycom_initial_conditions(target_date, bbox)
-        except Exception as e:
-            logger.error(f"HYCOM fetch failed: {e}")
+        logger.error(f"{meta['name']} fetch failed: {e}")
+        ds = None
 
     if ds is None:
         raise RuntimeError(
-            "No Initial Conditions could be fetched for this domain and time."
+            f"Primary IC donor {meta['name']} failed to return data. Silent failover to lower-res models is disabled."
         )
+
+    # Apply standard provenance attributes directly to dataset
+    ds.attrs.update(
+        {
+            "type": meta["name"],
+            "donor_id": meta["id"],
+            "source": "coastal-sim-data",  # existing parser relies on this string being 'UMass Dartmouth SMAST' or similar, but let's standardize
+        }
+    )
 
     # Save to Zarr
     logger.info(f"Writing Initial Conditions to {zarr_path}...")

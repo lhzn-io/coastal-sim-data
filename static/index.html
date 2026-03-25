@@ -14,51 +14,16 @@
 
 <body>
     <div class="app-container">
-        <!-- Sidebar Navigation -->
-        <aside class="sidebar glass-panel">
-            <div class="brand">
-                <div class="logo"></div>
-                <h1>coastal-sim<span>-data</span></h1>
-            </div>
-            <nav>
-                <a href="#" class="active">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path
-                            d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z">
-                        </path>
-                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
-                    </svg>
-                    Data Inventory
-                </a>
-                <a href="#">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <polyline points="12 6 12 12 16 14"></polyline>
-                    </svg>
-                    Simulation Engine
-                </a>
-            </nav>
-            <div class="sidebar-footer">
-                <p>Status: <span class="status-indicator online"></span> Active</p>
-                <p class="version">Cache API v1.0.0</p>
-            </div>
-        </aside>
-
         <!-- Main Content -->
         <main class="main-content">
             <header>
-                <h2>Forcing Cache Inventory</h2>
+                <div class="header-brand">
+                    <div class="logo"></div>
+                    <h1>coastal-sim<span>-data</span></h1>
+                    <span class="header-sep"></span>
+                    <h2>Forcing Cache Inventory</h2>
+                </div>
                 <div class="actions">
-                    <button id="refreshBtn" class="btn btn-primary">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <polyline points="23 4 23 10 17 10"></polyline>
-                            <polyline points="1 20 1 14 7 14"></polyline>
-                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                        </svg>
-                        Sync Cache
-                    </button>
                     <button id="purgeBtn" class="btn btn-danger">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2">

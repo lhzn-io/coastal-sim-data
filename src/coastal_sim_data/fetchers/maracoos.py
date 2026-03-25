@@ -5,6 +5,24 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+def get_metadata() -> dict:
+    return {
+        "id": "maracoos",
+        "name": "MARACOOS Rutgers DOPPIO",
+        "resolution_approx_m": 7000.0,
+        "type_desc": "ROMS structured grid",
+    }
+
+
+def supports_bbox(bbox: list[float]) -> bool:
+    min_lon, min_lat, max_lon, max_lat = bbox
+    # Rough check for DOPPIO bounds (MAB / LIS / Gulf of Maine)
+    if max_lat < 35.0 or min_lat > 46.0 or max_lon < -77.0 or min_lon > -65.0:
+        return False
+    return True
+
+
 # MARACOOS (Rutgers DOPPIO) OPeNDAP Endpoint
 # Operational 7km resolution ROMS model with 40 vertical levels
 # Covering the Mid-Atlantic Bight and Gulf of Maine
@@ -41,7 +59,11 @@ def fetch_maracoos_initial_conditions(
 
     try:
         # Open the dataset lazily with pydap
-        ds = xr.open_dataset(DOPPIO_THREDDS_URL, engine="pydap")
+        # pydap expects dap2:// or dap4:// instead of http:// or https://
+        dap_url = DOPPIO_THREDDS_URL.replace("https://", "dap2://").replace(
+            "http://", "dap2://"
+        )
+        ds = xr.open_dataset(dap_url, engine="pydap")
 
         # DOPPIO/ROMS coords
         lon_var = "lon_rho" if "lon_rho" in ds.coords else "lon"

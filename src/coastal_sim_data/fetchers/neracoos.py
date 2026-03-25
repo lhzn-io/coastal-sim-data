@@ -7,6 +7,24 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+
+def get_metadata() -> dict:
+    return {
+        "id": "neracoos",
+        "name": "NERACOOS NWPS",
+        "resolution_approx_m": 1000.0,
+        "type_desc": "Regular grid",
+    }
+
+
+def supports_bbox(bbox: list[float]) -> bool:
+    min_lon, min_lat, max_lon, max_lat = bbox
+    # NERACOOS NWPS CGX bounds roughly
+    if max_lat < 42.0 or min_lat > 44.5 or max_lon < -71.5 or min_lon > -69.0:
+        return False
+    return True
+
+
 # NERACOOS THREDDS Catalog Endpoint
 NERACOOS_CATALOG_URL = "https://data.neracoos.org/thredds/catalog/catalog.xml"
 NERACOOS_DODS_BASE = "https://data.neracoos.org/thredds/dodsC/"
@@ -93,7 +111,9 @@ def fetch_neracoos_initial_conditions(
             test_resp.raise_for_status()
 
             logger.info(f"Connected to valid dataset: {url}")
-            ds = xr.open_dataset(url, engine="pydap")
+            # pydap expects dap2:// or dap4:// instead of http:// or https://
+            dap_url = url.replace("https://", "dap2://").replace("http://", "dap2://")
+            ds = xr.open_dataset(dap_url, engine="pydap")
             break
         except Exception:
             # 404 means the dataset was deleted from THREDDS, continue to next

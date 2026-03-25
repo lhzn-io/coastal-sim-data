@@ -8,24 +8,44 @@ let camera = null;
 let controls = null;
 let arrowGroup = null;
 let animId = null;
-let active = false;
 
-// ── Color map: magnitude → deep blue → cyan → yellow → red ──
-function velocityColor(mag, maxMag) {
+// ── Depth exaggeration (matches hydro viewer: 10x base * slider) ──
+const DEPTH_EXAG = 8.0;  // equivalent to hydro viewer slider default
+const DEPTH_BASE_MULT = 10.0;
+
+// ── Color map: depth-aware (cyan surface → teal mid → magenta deep) ──
+// Ported from hydro viewer oceanICColor
+function depthColor(mag, maxMag, depthFrac) {
+    const d = Math.min(1, depthFrac || 0);
     const t = Math.min(1, mag / Math.max(maxMag, 0.001));
-    if (t < 0.33) {
-        const s = t / 0.33;
-        return new THREE.Color(0.05, 0.1 + 0.5 * s, 0.6 + 0.4 * s);
-    } else if (t < 0.66) {
-        const s = (t - 0.33) / 0.33;
-        return new THREE.Color(0.1 + 0.9 * s, 0.6 + 0.4 * s, 1.0 - 0.8 * s);
+    let r, g, b;
+
+    if (d < 0.33) {
+        // Electric cyan → vivid teal (surface)
+        const s = d / 0.33;
+        r = 0.0 + 0.1 * s;
+        g = 1.0 - 0.2 * s;
+        b = 1.0;
+    } else if (d < 0.66) {
+        // Vivid teal → hot blue (mid-depth)
+        const s = (d - 0.33) / 0.33;
+        r = 0.1 + 0.25 * s;
+        g = 0.8 - 0.5 * s;
+        b = 1.0;
     } else {
-        const s = (t - 0.66) / 0.34;
-        return new THREE.Color(1.0, 1.0 - 0.6 * s, 0.2 - 0.2 * s);
+        // Hot blue → neon magenta (deep)
+        const s = (d - 0.66) / 0.34;
+        r = 0.35 + 0.65 * s;
+        g = 0.3 - 0.15 * s;
+        b = 1.0;
     }
+
+    // Modulate brightness by velocity magnitude
+    const bright = 0.4 + 0.6 * t;
+    return new THREE.Color(r * bright, g * bright, b * bright);
 }
 
-// ── Merge simple geometries (no import needed) ──
+// ── Merge simple geometries ──
 function mergeGeos(geos) {
     let totalV = 0, allIdx = [];
     for (const g of geos) { totalV += g.attributes.position.count; }
@@ -66,12 +86,17 @@ function initThree(container) {
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
 
+    // Lighting: ambient + directional + uplight for subsurface visibility
     scene.add(new THREE.AmbientLight(0x404060, 0.8));
     const dir = new THREE.DirectionalLight(0xffffff, 0.7);
     dir.position.set(100, 200, 150);
     scene.add(dir);
+    // Uplight from below to illuminate subsurface arrows
+    const uplight = new THREE.DirectionalLight(0x334466, 0.4);
+    uplight.position.set(0, -100, 0);
+    scene.add(uplight);
 
-    // Grid helper
+    // Grid helper at surface (y=0)
     const grid = new THREE.GridHelper(200, 20, 0x1a2030, 0x1a2030);
     scene.add(grid);
 
@@ -137,8 +162,10 @@ function buildVectorField(data) {
     const arrowGeo = mergeGeos([shaft, cone]);
 
     const count = data.vectors.length;
-    const mat = new THREE.MeshPhongMaterial({ flatShading: true });
+    // depthTest: false so subsurface arrows render through the grid plane
+    const mat = new THREE.MeshPhongMaterial({ flatShading: true, depthTest: false });
     const mesh = new THREE.InstancedMesh(arrowGeo, mat, count);
+    mesh.renderOrder = 10;
 
     const dummy = new THREE.Object3D();
     const color = new THREE.Color();
@@ -149,7 +176,8 @@ function buildVectorField(data) {
 
         const sx = (v.lon - lonCenter) * cosLat * degToM * sceneScale;
         const sz = -(v.lat - latCenter) * degToM * sceneScale;
-        const sy = v.depth * sceneScale * 0.5; // vertical scale for depth
+        // Vertical exaggeration: depth (negative meters) * exag * base_mult * sceneScale
+        const sy = v.depth * DEPTH_EXAG * DEPTH_BASE_MULT * sceneScale;
 
         const angle = Math.atan2(-v.v, v.u);
         const arrowLen = Math.max(1, Math.min(6, (mag / Math.max(maxMag, 0.001)) * 5));
@@ -159,7 +187,7 @@ function buildVectorField(data) {
         dummy.scale.set(arrowLen, arrowLen, arrowLen);
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);
-        mesh.setColorAt(i, velocityColor(mag, maxMag));
+        mesh.setColorAt(i, depthColor(mag, maxMag, v.depth_frac || 0));
     }
 
     mesh.instanceMatrix.needsUpdate = true;
@@ -169,24 +197,28 @@ function buildVectorField(data) {
     // Add depth level planes as subtle reference
     for (const d of data.depth_levels) {
         if (d === 0) continue;
-        const planeY = d * sceneScale * 0.5;
+        const planeY = d * DEPTH_EXAG * DEPTH_BASE_MULT * sceneScale;
         const planeGeo = new THREE.PlaneGeometry(200, 200);
-        const planeMat = new THREE.MeshBasicMaterial({ color: 0x1a2a40, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+        const planeMat = new THREE.MeshBasicMaterial({
+            color: 0x1a2a40, transparent: true, opacity: 0.12,
+            side: THREE.DoubleSide, depthTest: false
+        });
         const plane = new THREE.Mesh(planeGeo, planeMat);
         plane.rotation.x = -Math.PI / 2;
         plane.position.y = planeY;
+        plane.renderOrder = 5;
         arrowGroup.add(plane);
     }
 
     scene.add(arrowGroup);
 
-    // Fit camera
+    // Fit camera to vector field bounds
     const box = new THREE.Box3().setFromObject(arrowGroup);
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const dist = Math.max(size.x, size.y, size.z) * 1.2;
     controls.target.copy(center);
-    camera.position.set(center.x, center.y + dist * 0.6, center.z + dist * 0.8);
+    camera.position.set(center.x + dist * 0.3, center.y + dist * 0.5, center.z + dist * 0.8);
     controls.update();
 }
 
@@ -195,7 +227,12 @@ window.preview3d = {
     active: false,
 
     show(container) {
-        if (!renderer) initThree(container);
+        // Re-init if canvas was destroyed (e.g. by 2D preview's innerHTML wipe)
+        const existing = document.getElementById('preview3dCanvas');
+        if (!renderer || !existing) {
+            if (renderer) { renderer.dispose(); renderer = null; scene = null; camera = null; controls = null; }
+            initThree(container);
+        }
         const canvas = document.getElementById('preview3dCanvas');
         if (canvas) canvas.style.display = 'block';
         this.active = true;

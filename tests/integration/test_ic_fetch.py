@@ -9,6 +9,7 @@ from coastal_sim_data.fetchers.nyhops import fetch_nyhops_initial_conditions
 from coastal_sim_data.fetchers.hycom import fetch_hycom_initial_conditions
 from coastal_sim_data.fetchers.maracoos import fetch_maracoos_initial_conditions
 from coastal_sim_data.fetchers.neracoos import fetch_neracoos_initial_conditions
+from coastal_sim_data.fetchers.necofs import fetch_necofs_initial_conditions
 
 
 def test_nyhops():
@@ -84,8 +85,30 @@ def test_neracoos():
         print("NERACOOS returned None (Error fetching).")
 
 
+def test_necofs():
+    # Great Bay Estuary NH (Within NECOFS GOM3)
+    bbox = [-70.9, 43.05, -70.8, 43.15]
+    print(f"\nTesting NECOFS (FVCOM GOM3) Fetcher for {bbox}...")
+
+    # We use a recent date
+    target_dt = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=24)
+    target_str = target_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    ds = fetch_necofs_initial_conditions(target_str, bbox)
+
+    if ds is not None:
+        print("NECOFS Success! Variables:")
+        print(list(ds.data_vars.keys()))
+        if "salt" in ds:
+            print(f"Salinity Shape: {ds.salt.shape}")
+            print(f"Dataset Dims: {ds.dims}")
+    else:
+        print("NECOFS returned None (Error fetching).")
+
+
 if __name__ == "__main__":
     # test_nyhops() # Stevens server is offline or blocking connection
+    test_necofs()
     test_maracoos()
     test_neracoos()
     test_hycom()

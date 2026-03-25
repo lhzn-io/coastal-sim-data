@@ -2,7 +2,6 @@ document.addEventListener("DOMContentLoaded", () => {
     console.log("coastal-sim-data UI Initialized");
     const datasetList = document.getElementById("datasetList");
     const datasetCount = document.getElementById("datasetCount");
-    const refreshBtn = document.getElementById("refreshBtn");
     const purgeBtn = document.getElementById("purgeBtn");
 
     // Preview Canvas Elements
@@ -18,9 +17,75 @@ document.addEventListener("DOMContentLoaded", () => {
     let mode3d = false;
     const vectorPairs = [["u", "v"], ["water_u", "water_v"], ["u10", "v10"]];
 
-    // Initialize View
+    // ── Custom Modal System ──
+    function createModal() {
+        const overlay = document.createElement("div");
+        overlay.className = "modal-overlay";
+        overlay.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-icon"></div>
+                <h3 class="modal-title"></h3>
+                <p class="modal-message"></p>
+                <div class="modal-actions"></div>
+            </div>`;
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+
+    function showModal({ title, message, icon = "warn", actions = [], danger = false }) {
+        const overlay = createModal();
+        const dialog = overlay.querySelector(".modal-dialog");
+        if (danger) dialog.classList.add("modal-danger");
+
+        const iconEl = overlay.querySelector(".modal-icon");
+        if (icon === "warn") {
+            iconEl.innerHTML = `<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+        } else if (icon === "trash") {
+            iconEl.innerHTML = `<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+        } else if (icon === "success") {
+            iconEl.innerHTML = `<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
+        } else if (icon === "error") {
+            iconEl.innerHTML = `<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
+        }
+
+        overlay.querySelector(".modal-title").textContent = title;
+        overlay.querySelector(".modal-message").innerHTML = message;
+
+        const actionsEl = overlay.querySelector(".modal-actions");
+        return new Promise(resolve => {
+            actions.forEach(({ label, cls, value }) => {
+                const btn = document.createElement("button");
+                btn.className = `btn ${cls || "btn-secondary"}`;
+                btn.textContent = label;
+                btn.addEventListener("click", () => {
+                    overlay.classList.add("modal-closing");
+                    setTimeout(() => { overlay.remove(); resolve(value); }, 150);
+                });
+                actionsEl.appendChild(btn);
+            });
+            // Close on backdrop click
+            overlay.addEventListener("click", (e) => {
+                if (e.target === overlay) {
+                    overlay.classList.add("modal-closing");
+                    setTimeout(() => { overlay.remove(); resolve(false); }, 150);
+                }
+            });
+            requestAnimationFrame(() => overlay.classList.add("modal-visible"));
+        });
+    }
+
+    function showAlert({ title, message, icon = "success" }) {
+        return showModal({
+            title, message, icon,
+            actions: [{ label: "OK", cls: "btn-primary", value: true }],
+        });
+    }
+
+    // ── Initialize View & Auto-Poll ──
+    let inventoryFingerprint = "";
+    let pollPaused = false;
+
     fetchInventory().then(() => {
-        // Deep-link: auto-select dataset from URL hash (e.g. #bc_a90a4eea6514)
         const hash = window.location.hash.replace('#', '');
         if (hash && currentInventory.length > 0) {
             const match = currentInventory.find(item => item.id === hash);
@@ -34,31 +99,44 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
         }
+        // Start auto-polling after initial load
+        setInterval(pollInventory, 2000);
     });
 
-    if (refreshBtn) {
-        refreshBtn.addEventListener("click", () => {
-            console.log("Sync Cache Clicked");
-            const icon = refreshBtn.querySelector("svg");
-            if (icon) icon.style.animation = "spin 1s linear infinite";
-            fetchInventory().finally(() => {
-                setTimeout(() => { if (icon) icon.style.animation = "none"; }, 500);
-            });
-        });
+    async function pollInventory() {
+        if (pollPaused) return;
+        try {
+            const resp = await fetch("/api/v1/cache/inventory", { cache: "no-store" });
+            if (!resp.ok) return;
+            const items = await resp.json();
+            // Only re-render if the inventory actually changed
+            const fp = items.map(i => `${i.id}:${i.modified_time}:${i.size_mb}`).join("|");
+            if (fp === inventoryFingerprint) return;
+            inventoryFingerprint = fp;
+            console.log("Inventory changed, re-rendering");
+            currentInventory = items;
+            renderInventory(items);
+        } catch (_) {
+            // Silently ignore poll failures
+        }
     }
 
     if (purgeBtn) {
-        console.log("Purge Button found in DOM, attaching listener");
         purgeBtn.addEventListener("click", async () => {
-            console.log("Purge Cache Clicked - requesting confirmation");
-            const confirmed = confirm("CRITICAL: Are you sure you want to purge the entire BC/IC data cache? This cannot be undone.");
+            const confirmed = await showModal({
+                title: "Purge Entire Cache",
+                message: "This will <strong>permanently delete all</strong> cached boundary conditions, initial conditions, and atmospheric forcing data.<br><br>This action <strong>cannot be undone</strong>.",
+                icon: "warn",
+                danger: true,
+                actions: [
+                    { label: "Cancel", cls: "btn-secondary", value: false },
+                    { label: "Purge Everything", cls: "btn-danger-fill", value: true },
+                ],
+            });
 
-            if (!confirmed) {
-                console.log("Purge cancelled by user");
-                return;
-            }
+            if (!confirmed) return;
 
-            console.log("Purge confirmed - executing API call");
+            pollPaused = true;
             purgeBtn.disabled = true;
             purgeBtn.textContent = "Purging...";
 
@@ -67,15 +145,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (!resp.ok) throw new Error("Failed to purge cache (HTTP " + resp.status + ")");
                 const data = await resp.json();
                 console.log("Purge successful:", data.message);
-                alert(data.message);
 
                 selectedDataset = null;
                 previewControls.classList.add("hidden");
                 previewCanvas.innerHTML = '<div class="empty-state"><p>Cache purged. Select a new dataset after generation.</p></div>';
-                fetchInventory();
+                await fetchInventory();
+                await showAlert({ title: "Cache Purged", message: data.message, icon: "success" });
             } catch (err) {
                 console.error("Purge failed:", err);
-                alert("Error: " + err.message);
+                await showAlert({ title: "Purge Failed", message: err.message, icon: "error" });
             } finally {
                 purgeBtn.disabled = false;
                 purgeBtn.innerHTML = `
@@ -86,17 +164,52 @@ document.addEventListener("DOMContentLoaded", () => {
                         <line x1="14" y1="11" x2="14" y2="17"></line>
                     </svg>
                     Purge Cache`;
+                pollPaused = false;
             }
         });
-    } else {
-        console.error("Purge Button NOT found in DOM!");
+    }
+
+    async function deleteDataset(item, e) {
+        e.stopPropagation();
+
+        const confirmed = await showModal({
+            title: "Delete Dataset",
+            message: `Delete <strong>${item.label || item.id}</strong> (${item.size_mb} MB)?<br><span style="color:var(--text-secondary);font-size:0.85rem;">${item.id}</span>`,
+            icon: "trash",
+            actions: [
+                { label: "Cancel", cls: "btn-secondary", value: false },
+                { label: "Delete", cls: "btn-danger-fill", value: true },
+            ],
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const resp = await fetch(`/api/v1/cache/dataset/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+            if (!resp.ok) {
+                const errJson = await resp.json().catch(() => ({}));
+                throw new Error(errJson.detail || `HTTP ${resp.status}`);
+            }
+            console.log(`Deleted dataset: ${item.id}`);
+            if (selectedDataset && selectedDataset.id === item.id) {
+                selectedDataset = null;
+                previewControls.classList.add("hidden");
+                previewCanvas.innerHTML = '<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg><p>Select a dataset to render map.</p></div>';
+                window.location.hash = '';
+            }
+            await fetchInventory();
+        } catch (err) {
+            console.error("Delete failed:", err);
+            await showAlert({ title: "Delete Failed", message: err.message, icon: "error" });
+        }
     }
 
     async function fetchInventory() {
         try {
-            const resp = await fetch("/api/v1/cache/inventory");
+            const resp = await fetch("/api/v1/cache/inventory", { cache: "no-store" });
             if (!resp.ok) throw new Error(`HTTP Error: ${resp.status}`);
             currentInventory = await resp.json();
+            inventoryFingerprint = currentInventory.map(i => `${i.id}:${i.modified_time}:${i.size_mb}`).join("|");
             renderInventory(currentInventory);
         } catch (err) {
             console.error("Failed to fetch inventory:", err);
@@ -136,6 +249,10 @@ document.addEventListener("DOMContentLoaded", () => {
             const isGRIB = item.type === "grib" || item.type === "grib2";
             const typeLabel = item.source || (isIC ? "Ocean IC" : (isBC ? "Boundary" : (isGRIB ? item.type.toUpperCase() : item.type)));
             const typeClass = isIC ? "type-ic" : (isBC ? "type-bc" : (isGRIB ? "type-grib" : `type-${item.type}`));
+            const donorLabel = item.donor_model ? `<span class="donor-label">${item.donor_model}</span>` : '';
+            const resLabel = item.resolution ? `<span class="res-label">${item.resolution}</span>` : '';
+            // Short hash from dataset ID (e.g. "bc_5439f3a2bf41" → "5439f3a2bf41")
+            const hashId = item.id.replace(/^(bc_|ic_)/, '');
 
             // Build display label
             const displayName = item.label || item.id;
@@ -145,9 +262,17 @@ document.addEventListener("DOMContentLoaded", () => {
             const varsLine = item.variables ? item.variables.join(', ') : '';
 
             card.innerHTML = `
-                <div class="card-title">${displayName}</div>
+                <div class="card-header">
+                    <div class="card-title">${displayName}</div>
+                    <button class="card-delete-btn" title="Delete dataset">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
+                </div>
                 <div class="card-meta">
-                    <span class="type-tag ${typeClass}">${typeLabel}</span>
+                    <span class="type-tag ${typeClass}">${typeLabel}${donorLabel}${resLabel}<span class="hash-label">${hashId}</span></span>
                     <span>${item.size_mb} MB</span>
                     <span>${date}</span>
                 </div>
@@ -156,6 +281,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 ${item.spatial_extent ? `<div class="card-stats">\ud83c\udf10 ${item.spatial_extent}</div>` : ''}
                 ${item.time_range ? `<div class="card-time">\ud83d\udcc5 ${item.time_range}</div>` : ''}
             `;
+
+            // Wire up delete button
+            card.querySelector(".card-delete-btn").addEventListener("click", (e) => deleteDataset(item, e));
 
             card.addEventListener("click", () => selectDataset(item, card));
             datasetList.appendChild(card);
@@ -201,20 +329,42 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // Populate variable dropdown from metadata if available
+        // Human-readable labels for common variable names
+        const varLabels = {
+            temp: "Temperature (temp)", salt: "Salinity (salt)",
+            zeta: "Surface Elevation (zeta)", ssh: "Sea Surface Height (ssh)",
+            t2m: "Air Temp 2m (t2m)", sp: "Surface Pressure (sp)",
+            hs: "Sig. Wave Height (hs)", water_level: "Water Level",
+        };
+        // Known u/v vector pairs — second component is hidden, first triggers 3D
+        const knownPairs = [["u", "v"], ["water_u", "water_v"], ["u10", "v10"]];
+        const pairLabels = {
+            u: "Current Velocity (u, v)", water_u: "Current Velocity (water_u, water_v)",
+            u10: "Wind 10m (u10, v10)",
+        };
+
         if (item.variables && item.variables.length > 0) {
             varSelect.innerHTML = '';
+            // Collect which variables are the "hidden" half of a vector pair
+            const hiddenVars = new Set();
+            for (const [uName, vName] of knownPairs) {
+                if (item.variables.includes(uName) && item.variables.includes(vName)) {
+                    hiddenVars.add(vName);
+                }
+            }
             item.variables.forEach(v => {
+                if (hiddenVars.has(v)) return;  // Skip v-component, it's merged into u
                 const opt = document.createElement('option');
                 opt.value = v;
-                opt.textContent = v;
+                opt.textContent = pairLabels[v] || varLabels[v] || v;
                 varSelect.appendChild(opt);
             });
             // Default to a vector variable for IC datasets so 3D auto-triggers
             const isIC = item.id.startsWith('ic_');
             const preferred = isIC
                 ? ['u', 'water_u', 'u10', 'zeta', 'temp']
-                : ['water_level', 'u10', 'zeta', 'temp'];
-            const defaultVar = preferred.find(p => item.variables.includes(p)) || item.variables[0];
+                : ['u10', 'zeta', 'temp'];
+            const defaultVar = preferred.find(p => item.variables.includes(p) && !hiddenVars.has(p)) || item.variables[0];
             varSelect.value = defaultVar;
         } else {
             // Fallback: show/hide hardcoded options
