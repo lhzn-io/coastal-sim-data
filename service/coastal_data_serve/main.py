@@ -520,3 +520,15 @@ async def download_ic(zarr_id: str):
     return FileResponse(
         zip_path, media_type="application/zip", filename=f"{zarr_id}.zip"
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=9598)
+    args = parser.parse_args()
+
+    uvicorn.run(app, host=args.host, port=args.port)

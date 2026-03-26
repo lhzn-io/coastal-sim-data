@@ -1,29 +1,35 @@
-ARG BASE_IMAGE=ghcr.io/dusty-nv/python:r36.2.0
+ARG BASE_IMAGE=nvcr.io/nvidia/l4t-base:r36.2.0
 FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-# Install system dev dependencies
-# Note: dusty-nv images already have many dev tools, but we make sure.
+# Install python and dev dependencies
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
     gcc \
     curl \
     libeccodes-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Alias python to python3
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
 # Install UV
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="/usr/local/bin" sh
 
 # Configure environment
-# On Jetson, we might want to use the system site-packages for some heavy libs (like numpy)
-# but for now we'll try uv's isolation.
-ENV UV_PROJECT_ENVIRONMENT="/usr/local" \
+ENV UV_PROJECT_ENVIRONMENT="/app/.venv" \
     PYTHONPATH="/app/src:/app/service"
 
+# Pre-create venv with system site packages if needed, but uv will manage its own
+# Actually, for coastal-sim-data we don't have apt-based python deps yet, but keep it clean.
 COPY pyproject.toml uv.lock ./
 COPY README.md ./
 COPY src/ /app/src/
 COPY service/ /app/service/
+COPY static/ /app/static/
 
 # Downgrade python was done in pyproject.toml. 
 # We use --frozen to respect uv.lock
