@@ -246,16 +246,36 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const isIC = item.id.startsWith("ic_");
             const isBC = item.id.startsWith("bc_");
-            const isGRIB = item.type === "grib" || item.type === "grib2";
-            const typeLabel = item.source || (isIC ? "Ocean IC" : (isBC ? "Boundary" : (isGRIB ? item.type.toUpperCase() : item.type)));
-            const typeClass = isIC ? "type-ic" : (isBC ? "type-bc" : (isGRIB ? "type-grib" : `type-${item.type}`));
-            const donorLabel = item.donor_model ? `<span class="donor-label">${item.donor_model}</span>` : '';
+            const isOBC = item.id.startsWith("obc_");
+            const isAtmos = isBC && !isOBC;
+
+            let catClass = isIC ? "type-ic" : (isOBC ? "type-zarr" : (isAtmos ? "type-bc" : "type-bc"));
+            let catLabel = isIC ? "INITIAL CONDITIONS" : (isOBC ? "OPEN BOUNDARY CONDITIONS" : "ATMOSPHERIC FORCING");
+
+            // If it's a raw grib file and not part of the standard processed zarrs
+            if (item.id.startsWith("hrrr") || item.id.startsWith("era")) {
+              catClass = "type-grib";
+              catLabel = item.id.startsWith("era") ? "RAW GRB/NC DONOR (ATMOSPHERIC/WIND)" : "RAW GRB/NC DONOR (ATMOSPHERIC)";
+            }
+            if (item.id.startsWith("necofs") && !item.id.startsWith("bc_") && !item.id.startsWith("ic_") && !item.id.startsWith("obc_")) {
+              catClass = "type-grib";
+              catLabel = "RAW GRB/NC DONOR (OCEAN/CURRENT)";
+            }
+
+            const typeLabel = catLabel;
+            const typeClass = catClass;
+
+            const donorLabel = item.donor_model ? `<span class="donor-label">${item.donor_model}</span>` : `<span class="donor-label">${item.source || ''}</span>`;
             const resLabel = item.resolution ? `<span class="res-label">${item.resolution}</span>` : '';
             // Short hash from dataset ID (e.g. "bc_5439f3a2bf41" → "5439f3a2bf41")
-            const hashId = item.id.replace(/^(bc_|ic_)/, '');
+            const hashId = item.id.replace(/^(bc_|ic_|obc_)/, '');
 
             // Build display label
-            const displayName = item.label || item.id;
+            let displayName = item.label || item.id;
+            if (isIC) displayName = "Ocean Initial Conditions";
+            else if (isOBC) displayName = "Open Boundary Conditions";
+            else if (isAtmos) displayName = "Atmospheric Boundary Conditions";
+
             const gridInfo = item.grid_shape ? `${item.grid_shape} grid` : '';
             const timeInfo = item.time_steps ? `${item.time_steps} steps` : '';
             const statsLine = [gridInfo, timeInfo].filter(Boolean).join(' \u00b7 ');
@@ -279,7 +299,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 ${statsLine ? `<div class="card-stats">${statsLine}</div>` : ''}
                 ${varsLine ? `<div class="card-vars">${varsLine}</div>` : ''}
                 ${item.spatial_extent ? `<div class="card-stats">\ud83c\udf10 ${item.spatial_extent}</div>` : ''}
-                ${item.time_range ? `<div class="card-time">\ud83d\udcc5 ${item.time_range}</div>` : ''}
+                ${item.time_range ? `<div class="card-time">${item.time_steps && item.time_steps <= 1 ? '⏱️' : '📅'} ${item.time_range}</div>` : ''}
             `;
 
             // Wire up delete button
@@ -361,7 +381,7 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             // Default to a vector variable for IC datasets so 3D auto-triggers
             const isIC = item.id.startsWith('ic_');
-            const preferred = isIC
+            const preferred = isIC || item.id.startsWith('obc_')
                 ? ['u', 'water_u', 'u10', 'zeta', 'temp']
                 : ['u10', 'zeta', 'temp'];
             const defaultVar = preferred.find(p => item.variables.includes(p) && !hiddenVars.has(p)) || item.variables[0];

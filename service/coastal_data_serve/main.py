@@ -29,6 +29,8 @@ log_dir.mkdir(exist_ok=True)
 
 log_level = logging.INFO
 root_logger = logging.getLogger()
+logging.getLogger("cfgrib").setLevel(logging.ERROR)
+logging.getLogger("cfgrib.messages").setLevel(logging.ERROR)
 root_logger.setLevel(log_level)
 
 formatter = logging.Formatter(
@@ -120,9 +122,23 @@ class ForcingRequest(BaseModel):
     cache_bust: bool = False
 
 
+class OBCRequest(BaseModel):
+    bbox: BoundingBox
+    start_date: str  # ISO8601 string
+    duration_hours: int
+    cache_bust: bool = False
+
+
 class ICRequest(BaseModel):
     bbox: BoundingBox
     target_date: str  # ISO8601 string
+    cache_bust: bool = False
+
+
+class ICRegridRequest(BaseModel):
+    zarr_id: str  # raw IC zarr ID (e.g., "ic_b6584ecacf33")
+    bbox: BoundingBox  # simulation domain
+    resolution: float  # target grid resolution in meters
     cache_bust: bool = False
 
 
@@ -317,14 +333,23 @@ async def generate_bc(request: ForcingRequest) -> Dict[str, Any]:
                     f"NOAA tide fetch failed (proceeding without tides): {e}"
                 )
 
-        grib_path = dispatch_forcing_request(
-            target_date=start_date_str, bbox=bbox_list, cache_bust=request.cache_bust
+        from datetime import datetime
+
+        start_dt = datetime.strptime(request.start_time, "%Y-%m-%dT%H:%M:%SZ")
+        end_dt = datetime.strptime(request.end_time, "%Y-%m-%dT%H:%M:%SZ")
+        duration_hours = int((end_dt - start_dt).total_seconds() / 3600) + 1
+
+        grib_paths = dispatch_forcing_request(
+            target_date=start_date_str,
+            duration_hours=duration_hours,
+            bbox=bbox_list,
+            cache_bust=request.cache_bust,
         )
 
         from coastal_sim_data.regridder import process_and_regrid_grib
 
         zarr_path = process_and_regrid_grib(
-            grib_path, bbox_list, zarr_path, tide_data=tide_data
+            grib_paths, bbox_list, zarr_path, tide_data=tide_data
         )
 
         # Write metadata manifest for traceability
@@ -519,6 +544,304 @@ async def download_ic(zarr_id: str):
 
     return FileResponse(
         zip_path, media_type="application/zip", filename=f"{zarr_id}.zip"
+    )
+
+
+@app.post("/api/v1/ic/regrid")
+async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
+    """
+    Regrid a raw IC zarr (curvilinear sigma coords) onto a regular grid at the
+    target simulation resolution. Performs horizontal interpolation only (Stages 1+2).
+    The vertical sigma→z remapping is left to the physics engine which has the actual
+    grid bathymetry.
+
+    The output zarr retains sigma levels and is keyed by (zarr_id, bbox, resolution).
+    """
+    import hashlib
+    import math
+
+    logger.info(
+        f"IC regrid request: {request.zarr_id} at {request.resolution}m for bbox {request.bbox}"
+    )
+
+    # Deterministic cache key: raw zarr + target grid params
+    hash_str = f"{request.zarr_id}_{request.bbox.min_lon}_{request.bbox.max_lon}_{request.bbox.min_lat}_{request.bbox.max_lat}_{request.resolution}"
+    md5_hash = hashlib.md5(hash_str.encode()).hexdigest()[:12]
+    regrid_id = f"ic_regrid_{md5_hash}"
+
+    base_dir = Path(
+        os.environ.get("COASTAL_SIM_DATA_CACHE_DIR", "~/.cache/coastal-sim-data")
+    ).expanduser()
+
+    # Source: raw IC zarr (in data service cache or engine cache)
+    src_zarr = os.path.join(base_dir, f"{request.zarr_id}.zarr")
+    if not os.path.exists(src_zarr):
+        # Try engine cache as fallback
+        engine_cache = Path("~/.cache/coastal-sim/ic").expanduser()
+        src_zarr = os.path.join(engine_cache, f"{request.zarr_id}.zarr")
+        if not os.path.exists(src_zarr):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Source IC zarr not found: {request.zarr_id}",
+            )
+
+    out_zarr = os.path.join(base_dir, f"{regrid_id}.zarr")
+
+    if not request.cache_bust and os.path.exists(out_zarr):
+        logger.info(f"Regrid cache hit: {regrid_id}")
+        return {
+            "status": "success",
+            "message": "IC regrid loaded from cache.",
+            "zarr_id": regrid_id,
+            "zarr_file": out_zarr,
+            "source_zarr_id": request.zarr_id,
+        }
+
+    try:
+        import numpy as np
+        import zarr
+        from scipy.spatial import cKDTree
+
+        src: zarr.Group = zarr.open(src_zarr, mode="r")  # type: ignore[assignment]
+
+        _lon = src["lon_rho"]
+        _lat = src["lat_rho"]
+        _s = src["s_rho"]
+        assert (
+            isinstance(_lon, zarr.Array)
+            and isinstance(_lat, zarr.Array)
+            and isinstance(_s, zarr.Array)
+        )
+        lon_rho = np.array(_lon[:], dtype=np.float64)
+        lat_rho = np.array(_lat[:], dtype=np.float64)
+        s_rho = np.array(_s[:], dtype=np.float64)
+        n_sigma = len(s_rho)
+
+        # Detect axis layout: match u shape against coordinate shape
+        _u = src["u"]
+        assert isinstance(_u, zarr.Array)
+        u_shape = _u.shape
+        coord_shape = lon_rho.shape
+        if len(u_shape) == 3 and u_shape[0] == n_sigma and u_shape[1:] == coord_shape:
+            depth_first = True
+            nxi, neta = coord_shape
+            logger.info(f"Axis layout: depth-first (s_rho={n_sigma}, {nxi}×{neta})")
+        elif len(u_shape) == 3 and u_shape[2] == n_sigma and u_shape[:2] == coord_shape:
+            depth_first = False
+            nxi, neta = coord_shape
+            logger.info(f"Axis layout: depth-last ({nxi}×{neta}, s_rho={n_sigma})")
+        else:
+            raise ValueError(
+                f"Unrecognized IC shape: u={u_shape}, coords={coord_shape}"
+            )
+
+        # Physical coordinate projection
+        bbox = request.bbox
+        mid_lat = (bbox.min_lat + bbox.max_lat) / 2.0
+        deg2m_lon = 111111.0 * math.cos(math.radians(mid_lat))
+        deg2m_lat = 111111.0
+        Lx = abs((bbox.max_lon - bbox.min_lon) * deg2m_lon)
+        Ly = abs((bbox.max_lat - bbox.min_lat) * deg2m_lat)
+
+        x_donor = (lon_rho - bbox.min_lon) * deg2m_lon
+        y_donor = (lat_rho - bbox.min_lat) * deg2m_lat
+
+        # Build KDTree from valid donor points within domain buffer
+        valid = ~(np.isnan(lon_rho) | np.isnan(lat_rho))
+        valid &= (x_donor > -0.5 * Lx) & (x_donor < 1.5 * Lx)
+        valid &= (y_donor > -0.5 * Ly) & (y_donor < 1.5 * Ly)
+        valid_idx = np.argwhere(valid)
+        coords = np.column_stack([x_donor[valid], y_donor[valid]])
+        tree = cKDTree(coords)
+        logger.info(f"KDTree: {len(valid_idx)} valid donor points")
+
+        # Target regular grid
+        Nx = max(2, round(Lx / request.resolution))
+        Ny = max(2, round(Ly / request.resolution))
+        x_target = np.linspace(0, Lx, Nx)
+        y_target = np.linspace(0, Ly, Ny)
+        xx, yy = np.meshgrid(x_target, y_target, indexing="ij")
+        query_pts = np.column_stack([xx.ravel(), yy.ravel()])
+
+        # KDTree IDW query (all target points at once)
+        K = 4
+        dists, idxs = tree.query(query_pts, k=K)
+        dists = np.maximum(dists, 1e-10)
+        weights = 1.0 / dists**2
+
+        # Read all fields and regrid per sigma level
+        if os.path.exists(out_zarr):
+            import shutil
+
+            shutil.rmtree(out_zarr)
+        store: zarr.Group = zarr.open(out_zarr, mode="w", zarr_format=2)  # type: ignore[assignment]
+
+        for var_name in ["u", "v", "temp", "salt"]:
+            if var_name not in src:
+                continue
+            _var = src[var_name]
+            assert isinstance(_var, zarr.Array)
+            raw = np.array(_var[:], dtype=np.float64)
+            result = np.zeros((Nx, Ny, n_sigma), dtype=np.float32)
+
+            for k in range(n_sigma):
+                slab = raw[k] if depth_first else raw[:, :, k]
+                # Extract values at valid points, handle fill values
+                vals = slab[valid]
+                bad = np.isnan(vals) | (vals < -9000)
+
+                # Per-query IDW with level validity
+                vals_at_neighbors = vals[idxs]  # (n_query, K)
+                bad_at_neighbors = bad[idxs]
+                w = weights.copy()
+                w[bad_at_neighbors] = 0
+                ws = w.sum(axis=1, keepdims=True)
+                ws[ws == 0] = 1  # avoid div-by-zero; will be nearest-neighbor fallback
+                interpolated = (w * vals_at_neighbors).sum(axis=1) / ws.squeeze()
+
+                # For points where ALL neighbors were bad, use nearest valid
+                all_bad = ws.squeeze() == 0
+                if all_bad.any():
+                    interpolated[all_bad] = 0.0  # fallback
+
+                result[:, :, k] = interpolated.reshape(Nx, Ny)
+
+            z = store.create_dataset(
+                var_name,
+                shape=(Nx, Ny, n_sigma),
+                chunks=(min(Nx, 256), min(Ny, 256), n_sigma),
+                dtype="f4",
+            )
+            z[:] = result
+            z.attrs["_ARRAY_DIMENSIONS"] = ["x", "y", "s_rho"]
+            logger.info(f"Regridded {var_name}: ({Nx}, {Ny}, {n_sigma})")
+
+        # Copy s_rho and write metadata
+        s_arr = store.create_dataset("s_rho", shape=(n_sigma,), dtype="f4")
+        s_arr[:] = s_rho.astype(np.float32)
+        s_arr.attrs["_ARRAY_DIMENSIONS"] = ["s_rho"]
+        store.attrs["bbox"] = [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat]
+        store.attrs["Nx"] = int(Nx)
+        store.attrs["Ny"] = int(Ny)
+        store.attrs["n_sigma"] = int(n_sigma)
+        store.attrs["resolution"] = float(request.resolution)
+        store.attrs["source_zarr_id"] = request.zarr_id
+        store.attrs["type"] = "regridded_ic"
+
+        logger.info(f"IC regrid complete: {regrid_id} ({Nx}×{Ny}×{n_sigma})")
+
+        return {
+            "status": "success",
+            "message": f"IC regridded to {Nx}×{Ny} at {request.resolution}m ({n_sigma} sigma levels).",
+            "zarr_id": regrid_id,
+            "zarr_file": out_zarr,
+            "source_zarr_id": request.zarr_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"IC regrid failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/obc/predict-donor")
+async def predict_obc_donor_endpoint(request: OBCRequest) -> Dict[str, Any]:
+    try:
+        from coastal_sim_data.dispatcher import predict_obc_donor
+
+        bbox_list = [
+            request.bbox.min_lon,
+            request.bbox.min_lat,
+            request.bbox.max_lon,
+            request.bbox.max_lat,
+        ]
+        donor_meta = predict_obc_donor(bbox_list)
+        if not donor_meta:
+            return {
+                "status": "error",
+                "message": "No donor found for OBC",
+                "donor": None,
+            }
+        return {"status": "success", "donor": donor_meta}
+    except Exception as e:
+        logger.error(f"Failed to predict OBC donor: {e}")
+        return {"status": "error", "message": str(e), "donor": None}
+
+
+@app.post("/api/v1/obc")
+async def generate_obc(request: OBCRequest) -> Dict[str, Any]:
+    bbox_list = [
+        request.bbox.min_lon,
+        request.bbox.min_lat,
+        request.bbox.max_lon,
+        request.bbox.max_lat,
+    ]
+    from coastal_sim_data.dispatcher import predict_obc_donor, dispatch_obc_request
+
+    meta = predict_obc_donor(bbox_list)
+    donor_id = meta.get("id", "unknown")
+
+    import hashlib
+
+    # Hash unique configuration plus donor
+    hash_str = (
+        f"{bbox_list}_{request.start_date}_{request.duration_hours}_{donor_id}_obc"
+    )
+    zarr_id = hashlib.md5(hash_str.encode()).hexdigest()[:12]
+    zarr_name = f"obc_{zarr_id}.zarr"
+    cache_dir = os.environ.get(
+        "COASTAL_SIM_DATA_CACHE_DIR", os.path.expanduser("~/.cache/coastal-sim-data")
+    )
+    zarr_path = os.path.join(cache_dir, zarr_name)
+
+    if not request.cache_bust and os.path.exists(zarr_path):
+        return {
+            "status": "cached",
+            "zarr_id": zarr_id,
+            "zarr_path": zarr_path,
+            "download_url": f"/api/v1/obc/download/{zarr_id}",
+            "donor": donor_id,
+        }
+
+    try:
+        final_path = dispatch_obc_request(
+            start_date=request.start_date,
+            duration_hours=request.duration_hours,
+            bbox=bbox_list,
+            cache_bust=request.cache_bust,
+            zarr_path=zarr_path,
+        )
+        return {
+            "status": "success",
+            "zarr_id": zarr_id,
+            "zarr_path": final_path,
+            "download_url": f"/api/v1/obc/download/{zarr_id}",
+            "donor": donor_id,
+        }
+    except Exception as e:
+        logger.error(f"OBC generation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/obc/download/{zarr_id}")
+async def download_obc(zarr_id: str):
+    cache_dir = os.environ.get(
+        "COASTAL_SIM_DATA_CACHE_DIR", os.path.expanduser("~/.cache/coastal-sim-data")
+    )
+    zarr_path = os.path.join(cache_dir, f"obc_{zarr_id}.zarr")
+
+    if not os.path.exists(zarr_path):
+        raise HTTPException(status_code=404, detail="OBC Zarr archive not found.")
+
+    # Compress the folder on the fly
+    zip_path = os.path.join(cache_dir, f"obc_{zarr_id}.zip")
+    if not os.path.exists(zip_path):
+        shutil.make_archive(zip_path.replace(".zip", ""), "zip", zarr_path)
+
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"obc_{zarr_id}.zip",
     )
 
 

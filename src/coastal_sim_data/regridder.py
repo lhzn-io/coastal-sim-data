@@ -1,13 +1,13 @@
 import xarray as xr
 import pandas as pd
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
 def process_and_regrid_grib(
-    grib_path: str,
+    grib_path: list[str] | str,
     bbox: list[float],
     output_zarr_path: str,
     tide_data: Optional[dict] = None,
@@ -25,28 +25,58 @@ def process_and_regrid_grib(
     logger.info(f"Processing meteorological GRIB file: {grib_path}...")
 
     # Load GRIB
-    # First try filtering by HRRR keys
-    try:
-        ds = xr.open_dataset(
-            grib_path,
-            engine="cfgrib",
-            backend_kwargs={
-                "filter_by_keys": {
-                    "typeOfLevel": "heightAboveGround",
-                    "stepType": "instant",
-                    "level": 10,
-                }
-            },
-        )
-        if len(ds.data_vars) == 0:
-            raise ValueError("Empty dataset returned with HRRR filter keys.")
-    except Exception as e:
-        logger.debug(
-            f"Failed to load with HRRR keys ({e}), attempting fallback for surface-level datasets (e.g. ERA5)..."
-        )
-        # Fallback for single-level ERA5
-        ds = xr.open_dataset(grib_path, engine="cfgrib")
+    paths = grib_path if isinstance(grib_path, list) else [grib_path]
 
+    # Try filter strategies in order of specificity:
+    #   1. HRRR surface (full GRIB2 with many variables)
+    #   2. HRRR 10m wind (wind-only GRIB2 from selective .idx fetch)
+    #   3. Unfiltered fallback (ERA5 or other sources)
+    filter_strategies: list[tuple[str, dict[str, Any]]] = [
+        (
+            "HRRR surface",
+            {"filter_by_keys": {"typeOfLevel": "surface", "stepType": "instant"}},
+        ),
+        (
+            "HRRR 10m wind",
+            {"filter_by_keys": {"typeOfLevel": "heightAboveGround", "level": 10}},
+        ),
+        ("unfiltered fallback", {}),
+    ]
+
+    ds = None
+    for strategy_name, backend_kwargs in filter_strategies:
+        try:
+            datasets = []
+            for gp in paths:
+                d = xr.open_dataset(gp, engine="cfgrib", backend_kwargs=backend_kwargs)
+                # Drop scalar coords that vary per file (forecast step, reference time)
+                # to prevent concat conflicts. valid_time is the true timestamp.
+                drop_coords = [
+                    c for c in ["time", "step"] if c in d.coords and d[c].dims == ()
+                ]
+                if drop_coords:
+                    d = d.drop_vars(drop_coords)
+                datasets.append(d)
+
+            if "valid_time" in datasets[0].coords:
+                datasets.sort(key=lambda d: d.valid_time.values)
+
+            dim = "valid_time" if "valid_time" in datasets[0].coords else "time"
+            ds = xr.concat(datasets, dim=dim, coords="minimal")
+            if "valid_time" in ds.dims or "valid_time" in ds.coords:
+                ds = ds.rename({"valid_time": "time"})
+            if len(ds.data_vars) == 0:
+                raise ValueError(f"Empty dataset with {strategy_name} filter.")
+            logger.info(
+                f"Loaded GRIB with '{strategy_name}' strategy: {list(ds.data_vars)}"
+            )
+            break
+        except Exception as e:
+            logger.debug(f"Filter '{strategy_name}' failed: {e}")
+            continue
+
+    if ds is None:
+        raise RuntimeError(f"Could not load any variables from GRIB file(s): {paths}")
     # Rename coords if they use standard GRIB aliases
     rename_dict = {}
     if "lon" in ds.coords:

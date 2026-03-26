@@ -31,7 +31,7 @@ COPY src/ /app/src/
 COPY service/ /app/service/
 COPY static/ /app/static/
 
-# Downgrade python was done in pyproject.toml. 
+# Downgrade python was done in pyproject.toml.
 # We use --frozen to respect uv.lock
 RUN uv sync --frozen --no-dev --compile-bytecode
 

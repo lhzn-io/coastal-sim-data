@@ -136,7 +136,7 @@ function buildVectorField(data) {
     const [lonMin, latMin, lonMax, latMax] = data.bounds;
     const lonCenter = (lonMin + lonMax) / 2;
     const latCenter = (latMin + latMax) / 2;
-    const cosLat = Math.cos(latCenter * Math.PI / 180);
+    let cc = latCenter; if (cc > 90 || cc < -90) cc = 0; const cosLat = Math.cos(cc * Math.PI / 180);
     const degToM = 111320;
 
     // Scale scene to ~200 units across
@@ -179,11 +179,11 @@ function buildVectorField(data) {
         // Vertical exaggeration: depth (negative meters) * exag * base_mult * sceneScale
         const sy = v.depth * DEPTH_EXAG * DEPTH_BASE_MULT * sceneScale;
 
-        const angle = Math.atan2(-v.v, v.u);
+        const rotY = Math.atan2(v.u, -v.v);
         const arrowLen = Math.max(1, Math.min(6, (mag / Math.max(maxMag, 0.001)) * 5));
 
         dummy.position.set(sx, sy, sz);
-        dummy.rotation.set(0, -angle, 0);
+        dummy.rotation.set(0, rotY, 0);
         dummy.scale.set(arrowLen, arrowLen, arrowLen);
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);

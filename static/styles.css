@@ -161,16 +161,32 @@ h2 {
 
 /* Dashboard Grid */
 .dashboard-grid {
-    display: grid;
-    grid-template-columns: minmax(220px, auto) 1fr;
+    display: flex;
     gap: 16px;
     height: calc(100vh - 100px);
 }
 
 .dataset-column {
+    width: 25%;
+    flex-shrink: 0;
+    min-width: 320px;
+    max-width: 50%;
+    resize: horizontal;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+}
+
+.dataset-column::after {
+    /* optional style for resizer */
+}
+
+.dataset-column::after {
+    /* optional style for resizer */
+}
+
+.dataset-column::after {
+    /* optional style for resizer */
 }
 
 .list-header,
@@ -214,7 +230,7 @@ h3 {
     cursor: pointer;
     transition: var(--transition);
     position: relative;
-    overflow: hidden;
+
 }
 
 .dataset-card:hover {
@@ -357,6 +373,9 @@ h3 {
     margin-top: 2px;
     font-family: monospace;
     opacity: 0.7;
+    white-space: normal;
+    word-wrap: break-word;
+    line-height: 1.3;
 }
 
 .card-time {
@@ -368,6 +387,8 @@ h3 {
 
 /* Preview Panel */
 .preview-panel {
+    flex-grow: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -593,3 +614,61 @@ h3 {
     min-width: 100px;
     justify-content: center;
 }
+
+/* Tooltip styling */
+.info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    color: #8b949e;
+    cursor: help;
+    position: relative;
+    font-size: 13px;
+    margin-left: 6px;
+}
+.info-icon:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+}
+.info-icon .tooltip-text {
+    visibility: hidden;
+    width: 320px;
+    background-color: #161b22;
+    color: #c9d1d9;
+    text-align: left;
+    border-radius: 6px;
+    padding: 12px;
+    position: absolute;
+    z-index: 1000;
+    top: 125%;
+    left: 50%;
+    transform: translateX(-50%);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    border: 1px solid rgba(240, 246, 252, 0.1);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.5;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.info-icon .tooltip-text::after {
+    content: "";
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    margin-left: -5px;
+    border-width: 5px;
+    border-style: solid;
+    border-color: transparent transparent rgba(240, 246, 252, 0.1) transparent;
+}
+.info-icon:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+}
+.tier-red { color: #f85149; font-weight: 600; }
+.tier-green { color: #2ea043; font-weight: 600; }
+.tier-blue { color: #58a6ff; font-weight: 600; }

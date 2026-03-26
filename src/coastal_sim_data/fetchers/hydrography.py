@@ -66,7 +66,7 @@ def find_head_of_tide(
                 if attempt == max_retries - 1:
                     raise
                 logger.warning(
-                    f"OSM API timeout/error (attempt {attempt+1}/{max_retries}): {e}. Retrying..."
+                    f"OSM API timeout/error (attempt {attempt + 1}/{max_retries}): {e}. Retrying..."
                 )
                 time.sleep(2)
 

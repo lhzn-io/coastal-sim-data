@@ -42,9 +42,20 @@
                 <!-- Data List Column -->
                 <div class="dataset-column glass-panel">
                     <div class="list-header">
-                        <h3>Available Datasets</h3>
-                        <span id="datasetCount" class="badge">0</span>
-                    </div>
+    <div style="display:flex; align-items:center;">
+        <h3>Available Datasets</h3>
+        <div class="info-icon">
+            ?
+            <div class="tooltip-text">
+                <div style="margin-bottom:8px;font-weight:600;color:#fff;">Cache Tier Ecosystem</div><div style="margin-bottom:8px;font-size:0.9em;color:#8b949e;"><i>All displayed timestamps are in UTC.</i></div>
+                <div><span class="tier-red">Tier 1: RAW DONOR</span><br>Direct fetch from outer sources (NOAA, ECMWF). Cached intermediately but <b>not</b> digested by the physics engine.</div>
+                <div style="margin-top:8px;"><span class="tier-green">Tier 2: BOUNDARY CONDITIONS</span><br>Regridded, interpolated variables mapped to the local <i>coastal-sim</i> domain. Engine ready.</div>
+                <div style="margin-top:8px;"><span class="tier-blue">Tier 3: INITIAL CONDITIONS</span><br>The simulation timestep <i>t=0</i> ocean state.</div>
+            </div>
+        </div>
+    </div>
+    <span id="datasetCount" class="badge">0</span>
+</div>
                     <div id="datasetList" class="dataset-list">
                         <!-- Populated via JS -->
                         <div class="loading-state">

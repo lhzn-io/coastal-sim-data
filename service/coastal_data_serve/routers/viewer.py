@@ -32,7 +32,8 @@ class CacheItem(BaseModel):
 
 
 def _enrich_zarr_metadata(zarr_path: Path) -> dict:
-    """Extract grid shape, variables, time range, and source label from a zarr dataset."""
+    label = None
+    label = None
     try:
         import xarray as xr
         import numpy as np
@@ -41,24 +42,49 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
         try:
             ds = xr.open_zarr(str(zarr_path), consolidated=False, decode_times=True)
         except Exception:
-            ds = xr.open_zarr(str(zarr_path), consolidated=False, decode_times=False)
+            ds = xr.open_zarr(str(zarr_path), consolidated=False, decode_times=True)
         # Filter out scalar (0-d) variables — these are GRIB metadata artifacts
         variables = [v for v in ds.data_vars if ds[v].ndim > 0]
 
         # Grid shape, spatial extent, and resolution from coordinate arrays
-        lat_dim = next((d for d in ["latitude", "lat", "y"] if d in ds.sizes), None)
-        lon_dim = next((d for d in ["longitude", "lon", "x"] if d in ds.sizes), None)
-        # Also check for curvilinear ROMS grids (lat_rho/lon_rho are coords, not dims)
-        lat_coord = lat_dim
-        lon_coord = lon_dim
-        if not lat_coord:
-            lat_coord = next(
-                (c for c in ["lat_rho", "latitude", "lat"] if c in ds.coords), None
-            )
-        if not lon_coord:
-            lon_coord = next(
-                (c for c in ["lon_rho", "longitude", "lon"] if c in ds.coords), None
-            )
+        lat_dim = next(
+            (
+                d
+                for d in ["latitude", "lat", "y", "eta", "eta_rho", "eta_u", "eta_v"]
+                if d in ds.sizes
+            ),
+            None,
+        )
+        lon_dim = next(
+            (
+                d
+                for d in ["longitude", "lon", "x", "xi", "xi_rho", "xi_u", "xi_v"]
+                if d in ds.sizes
+            ),
+            None,
+        )
+        # Separate dimensions from physical coordinates
+        lat_coord = next(
+            (
+                c
+                for c in ["lat_rho", "latitude", "lat", "lat_u", "lat_v"]
+                if c in ds.coords
+            ),
+            None,
+        )
+        lon_coord = next(
+            (
+                c
+                for c in ["lon_rho", "longitude", "lon", "lon_u", "lon_v"]
+                if c in ds.coords
+            ),
+            None,
+        )
+
+        if not lat_coord and lat_dim in ds.coords:
+            lat_coord = lat_dim
+        if not lon_coord and lon_dim in ds.coords:
+            lon_coord = lon_dim
 
         spatial_extent = None
         resolution = None
@@ -125,106 +151,75 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
             None,
         )
         time_steps = ds.sizes[time_dim] if time_dim else None
+        source = ds.attrs.get("type", None) or ds.attrs.get("source", None)
+        if source and "NECOFS" in source:
+            donor_model = "UMASS"
+            source = "NECOFS ~193m"
+        elif source and "HRRR" in source:
+            donor_model = "NOAA"
+        elif source and "ERA" in source:
+            donor_model = "ECMWF"
+        else:
+            donor_model = ds.attrs.get("donor_id", None)
+
         time_range = None
-        if time_dim and time_steps and time_steps > 0:
+        delta_t_str = ""
+
+        if "target_date" in ds.attrs:
             try:
                 from datetime import datetime as dt
+                import pandas as pd
+
+                d0 = pd.to_datetime(ds.attrs["target_date"])
+                time_range = f"{d0.strftime('%b %d %H:%M')} UTC"
+            except Exception:
+                time_range = f"{ds.attrs['target_date']} UTC"
+            if not time_steps:
+                time_steps = 1
+        elif time_dim and time_steps and time_steps > 0:
+            try:
+                from datetime import datetime as dt
+                import pandas as pd
 
                 t_vals = ds[time_dim].values
                 t0 = np.datetime64(t_vals[0], "ns")
                 t1 = np.datetime64(t_vals[-1], "ns")
                 d0 = t0.astype("datetime64[s]").astype(dt)
                 d1 = t1.astype("datetime64[s]").astype(dt)
-                time_range = (
-                    f"{d0.strftime('%b %d %H:%M')} \u2192 {d1.strftime('%b %d %H:%M')}"
-                )
-            except Exception:
-                time_range = f"{time_steps} steps"
 
-        # Source detection
-        stem = zarr_path.stem.lower()
-        donor_model = None
-        if stem.startswith("bc_"):
-            # Detect source from variables present
-            if "sp" in variables or "surface_pressure" in variables:
-                source = "ERA5"
-                donor_model = "ECMWF"
-            elif any(v.startswith("HRRR") or "hrrr" in v for v in variables):
-                source = "HRRR"
-                donor_model = "NOAA"
-            else:
-                source = "Atmospheric Forcing"
-            label = f"{source} Boundary Conditions"
-        elif stem.startswith("ic_"):
-            raw_type = ds.attrs.get("type", "Ocean IC")
-            # Shorten verbose model strings (case-insensitive)
-            import re
-
-            source = re.sub(
-                r"\s+history\s+file", "", raw_type, flags=re.IGNORECASE
-            ).strip()
-            label = "Initial Conditions"
-            # Extract donor model: check donor_id attr, then type/title attrs
-            donor_id = ds.attrs.get("donor_id", "")
-            title = ds.attrs.get("title", "")
-            search_text = f"{raw_type} {title} {donor_id}".lower()
-            _DONOR_MAP = {
-                "hycom": "HYCOM",
-                "neracoos": "NERACOOS",
-                "necofs": "NECOFS",
-                "maracoos": "MARACOOS",
-                "nyhops": "NYHOPS",
-            }
-            if donor_id in _DONOR_MAP:
-                donor_model = _DONOR_MAP[donor_id]
-            elif "hycom" in search_text:
-                donor_model = "HYCOM"
-            elif "necofs" in search_text or "fvcom" in search_text:
-                donor_model = "NECOFS"
-            elif "neracoos" in search_text or "nwps" in search_text:
-                donor_model = "NERACOOS"
-            elif "doppio" in search_text or "maracoos" in search_text:
-                donor_model = "MARACOOS"
-            elif "nyhops" in search_text:
-                donor_model = "NYHOPS"
-        elif "hrrr" in stem:
-            source = "HRRR"
-            label = f"HRRR Forecast ({stem.split('_')[1] if '_' in stem else ''})"
-        elif "era5" in stem:
-            source = "ERA5" if "era5t" not in stem else "ERA5T"
-            label = f"{source} Reanalysis ({stem.split('_')[1] if '_' in stem else ''})"
-        else:
-            source = None
-            label = None
-
-        ds.close()
-
-        # Read target_date from sidecar metadata JSON if available
-        target_date = None
-        sidecar = zarr_path.with_name(zarr_path.stem + "_metadata.json")
-        if sidecar.exists():
-            try:
-                import json
-
-                with open(sidecar) as f:
-                    target_date = json.load(f).get("target_date")
+                if len(t_vals) > 1:
+                    dt_secs = int(
+                        np.timedelta64(np.datetime64(t_vals[1], "ns") - t0, "s").astype(
+                            int
+                        )
+                    )
+                    if dt_secs > 0:
+                        if dt_secs >= 3600:
+                            delta_t_str = f" (Δt={dt_secs//3600}hr)"
+                        else:
+                            delta_t_str = f" (Δt={dt_secs//60}m)"
+                    time_range = f"{d0.strftime('%b %d %H:%M')} → {d1.strftime('%b %d %H:%M')} UTC{delta_t_str}"
+                else:
+                    time_range = f"{d0.strftime('%b %d %H:%M')} UTC"
             except Exception:
                 pass
 
+        label = None
         return {
-            "label": label,
-            "variables": variables,
-            "grid_shape": grid_shape,
-            "time_steps": time_steps,
-            "time_range": time_range,
-            "source": source,
-            "donor_model": donor_model,
-            "resolution": resolution,
-            "spatial_extent": spatial_extent,
-            "target_date": target_date,
+            "label": locals().get("label", None),
+            "variables": locals().get("variables", []),
+            "grid_shape": locals().get("grid_shape", None),
+            "time_steps": locals().get("time_steps", None),
+            "time_range": locals().get("time_range", None),
+            "source": locals().get("source", None),
+            "donor_model": locals().get("donor_model", None),
+            "resolution": locals().get("resolution", None),
+            "spatial_extent": locals().get("spatial_extent", None),
+            "target_date": locals().get("target_date", None),
         }
     except Exception as e:
         logger.warning(f"Failed to enrich metadata for {zarr_path.name}: {e}")
+        label = None
         return {}
 
 
@@ -274,59 +269,138 @@ async def get_cache_inventory(response: FastAPIResponse):
                 resolution = None
 
                 if "hrrr" in stem:
-                    source = "HRRR"
+                    if "_f" in stem:
+                        continue
+                    source = "HRRR ~3km"
                     donor_model = "NOAA"
-                    parts = file_path.stem.split("_")
-                    date_part = parts[1] if len(parts) > 1 else ""
-                    cycle_part = parts[2].upper() if len(parts) > 2 else ""
-                    label = f"HRRR Boundary Conditions {date_part} {cycle_part}"
-                elif "era5" in stem:
-                    source = "ERA5T" if "era5t" in stem else "ERA5"
-                    donor_model = "ECMWF"
+                    resolution = "~3km"
                     label = f"{source} Boundary Conditions"
+                elif "era5" in stem:
+                    source = "ERA5T ~31km" if "era5t" in stem else "ERA5 ~31km"
+                    donor_model = "ECMWF"
+                    resolution = "~31km"
+                    label = f"{source} Boundary Conditions"
+                elif "necofs" in stem:
+                    source = "NECOFS ~193m"
+                    donor_model = "UMASS"
+                    resolution = "~193m"
+                    label = "NECOFS Raw Validated"
 
                 # Enrich GRIB/NC with grid and variable metadata
                 try:
                     import xarray as xr
                     import numpy as np
 
+                    # Suppress noisy expected grib warnings
+                    import logging
+
+                    logging.getLogger("cfgrib.messages").setLevel(logging.ERROR)
+
                     try:
                         gds = xr.open_dataset(
                             str(file_path),
-                            decode_times=False,
+                            decode_times=True,
                             engine="cfgrib",
                             backend_kwargs={
-                                "filter_by_keys": {"typeOfLevel": "heightAboveGround"}
+                                "filter_by_keys": {
+                                    "typeOfLevel": "surface",
+                                    "stepType": "instant",
+                                }
                             },
                         )
                     except Exception:
                         try:
-                            gds = xr.open_dataset(str(file_path), decode_times=False)
+                            gds = xr.open_dataset(
+                                str(file_path), decode_times=True, engine="cfgrib"
+                            )
                         except Exception:
-                            gds = None
+                            try:
+                                gds = xr.open_dataset(str(file_path), decode_times=True)
+                            except Exception:
+                                gds = None
 
                     if gds is not None:
                         variables = [str(v) for v in gds.data_vars if gds[v].ndim > 0]
                         _lat = next(
-                            (d for d in ["latitude", "lat", "y"] if d in gds.sizes),
-                            None,
+                            (c for c in gds.coords if "lat" in str(c).lower()), None
                         )
                         _lon = next(
-                            (d for d in ["longitude", "lon", "x"] if d in gds.sizes),
+                            (c for c in gds.coords if "lon" in str(c).lower()), None
+                        )
+                        time_dim = next(
+                            (
+                                d
+                                for d in ["time", "t", "step", "valid_time"]
+                                if d in gds.sizes or d in gds.coords
+                            ),
                             None,
                         )
+                        time_steps = 1
+                        time_range = None
+                        if time_dim:
+                            try:
+                                from datetime import datetime as dt
+                                import numpy as np
+
+                                t_vals = gds[time_dim].values
+                                if getattr(t_vals, "ndim", 0) == 0:
+                                    t_vals = np.array([t_vals])
+                                time_steps = len(t_vals)
+                                t0 = np.datetime64(t_vals[0], "ns")
+                                t1 = np.datetime64(t_vals[-1], "ns")
+                                d0 = t0.astype("datetime64[s]").astype(dt)
+                                d1 = t1.astype("datetime64[s]").astype(dt)
+                                delta_t_str = ""
+                                if len(t_vals) > 1:
+                                    dt_secs = int(
+                                        np.timedelta64(
+                                            np.datetime64(t_vals[1], "ns") - t0, "s"
+                                        ).astype(int)
+                                    )
+                                    if dt_secs > 0:
+                                        delta_t_str = (
+                                            f" (Δt={dt_secs//3600}hr)"
+                                            if dt_secs >= 3600
+                                            else f" (Δt={dt_secs//60}m)"
+                                        )
+                                if d0 == d1:
+                                    time_range = f"{d0.strftime('%b %d %H:%M')} UTC"
+                                else:
+                                    time_range = f"{d0.strftime('%b %d %H:%M')} → {d1.strftime('%b %d %H:%M')} UTC{delta_t_str}"
+                            except Exception:
+                                pass
+
                         if _lat and _lon:
-                            nlat, nlon = gds.sizes[_lat], gds.sizes[_lon]
-                            grid_shape = f"{nlat}\u00d7{nlon}"
                             if _lat in gds.coords and _lon in gds.coords:
                                 lat_v = gds[_lat].values
                                 lon_v = gds[_lon].values
+                                if getattr(lat_v, "ndim", 0) == 2:
+                                    grid_shape = (
+                                        f"{lat_v.shape[0]}\u00d7{lat_v.shape[1]}"
+                                    )
+                                else:
+                                    nlat = (
+                                        lat_v.shape[0]
+                                        if getattr(lat_v, "ndim", 0) > 0
+                                        else 1
+                                    )
+                                    nlon = (
+                                        lon_v.shape[0]
+                                        if getattr(lon_v, "ndim", 0) > 0
+                                        else 1
+                                    )
+                                    grid_shape = f"{nlat}\u00d7{nlon}"
+
                                 if lat_v.size > 0 and lon_v.size > 0:
                                     spatial_extent = (
                                         f"{float(np.min(lon_v)):.2f}, {float(np.min(lat_v)):.2f}"
                                         f" \u2192 {float(np.max(lon_v)):.2f}, {float(np.max(lat_v)):.2f}"
                                     )
-                                    if len(lat_v) > 1:
+                                    if (
+                                        getattr(lat_v, "ndim", 0) == 1
+                                        and len(lat_v) > 1
+                                        and not resolution
+                                    ):
                                         dlat = float(np.median(np.abs(np.diff(lat_v))))
                                         dlon = float(np.median(np.abs(np.diff(lon_v))))
                                         mid_lat = float(np.mean(lat_v))
@@ -363,6 +437,8 @@ async def get_cache_inventory(response: FastAPIResponse):
                         grid_shape=grid_shape,
                         spatial_extent=spatial_extent,
                         resolution=resolution,
+                        time_steps=time_steps,
+                        time_range=time_range,
                     )
                 )
 
@@ -396,7 +472,7 @@ async def delete_dataset(dataset_id: str):
         if file_path.is_file():
             file_path.unlink()
             logger.info(f"Deleted dataset: {file_path}")
-            return {"status": "success", "message": f"Deleted {dataset_id}"}
+        return {"status": "success", "message": f"Deleted {dataset_id}"}
 
     raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found.")
 
@@ -444,33 +520,34 @@ async def get_dataset_preview(
             try:
                 ds = xr.open_dataset(full_path, decode_times=True)
             except Exception as e:
-                if "multiple values for unique key" in str(e):
-                    # Try common level types in priority order for surface forcing
-                    for filter_key in [
-                        "heightAboveGround",
-                        "surface",
-                        "isobaricInhPa",
-                        "meanSea",
-                        "atmosphere",
-                    ]:
-                        try:
-                            candidate = xr.open_dataset(
-                                full_path,
-                                decode_times=True,
-                                engine="cfgrib",
-                                backend_kwargs={
-                                    "filter_by_keys": {"typeOfLevel": filter_key}
-                                },
-                            )
-                            # Accept this filter if it contains the requested variable
-                            if var_name in candidate.data_vars or ds is None:
-                                ds = candidate
-                                if var_name in candidate.data_vars:
-                                    break
-                        except Exception:
-                            continue
+                # Try common level types in priority order for surface forcing
+                for filter_obj in [
+                    {"typeOfLevel": "surface", "stepType": "instant"},
+                    {"typeOfLevel": "heightAboveGround", "stepType": "instant"},
+                    {"typeOfLevel": "surface"},
+                    {"typeOfLevel": "heightAboveGround"},
+                    {"typeOfLevel": "isobaricInhPa"},
+                    {"typeOfLevel": "meanSea"},
+                    {"typeOfLevel": "atmosphere"},
+                ]:
+                    try:
+                        candidate = xr.open_dataset(
+                            full_path,
+                            decode_times=True,
+                            engine="cfgrib",
+                            backend_kwargs={"filter_by_keys": filter_obj},
+                        )
+                        # Accept this filter if it contains the requested variable
+                        if var_name in candidate.data_vars or ds is None:
+                            ds = candidate
+                            if var_name in candidate.data_vars:
+                                break
+                    except Exception:
+                        continue
                 if ds is None:
-                    raise e
+                    raise HTTPException(
+                        status_code=500, detail=f"Failed to parse GRIB: {e}"
+                    )
 
         # Map common variable names across naming conventions
         if var_name not in ds.variables:
@@ -843,10 +920,10 @@ async def get_dataset_preview_3d(
             return None
 
         u_lon_name = _find_coord(
-            u_da, [f"lon_{u_var}", "longitude", "lon", "lon_rho", "x"]
+            u_da, [f"lon_{u_var}", "longitude", "lon", "lon_rho", "x", "xi"]
         )
         u_lat_name = _find_coord(
-            u_da, [f"lat_{u_var}", "latitude", "lat", "lat_rho", "y"]
+            u_da, [f"lat_{u_var}", "latitude", "lat", "lat_rho", "y", "eta"]
         )
 
         # Squeeze out broadcast/extra dims: keep only depth + the spatial dims that
@@ -865,10 +942,10 @@ async def get_dataset_preview_3d(
 
         u_da = _squeeze_broadcast(u_da, u_lon_name, u_lat_name)
         v_lon_name = _find_coord(
-            v_da, [f"lon_{v_var}", "longitude", "lon", "lon_rho", "x"]
+            v_da, [f"lon_{v_var}", "longitude", "lon", "lon_rho", "x", "xi"]
         )
         v_lat_name = _find_coord(
-            v_da, [f"lat_{v_var}", "latitude", "lat", "lat_rho", "y"]
+            v_da, [f"lat_{v_var}", "latitude", "lat", "lat_rho", "y", "eta"]
         )
         v_da = _squeeze_broadcast(v_da, v_lon_name, v_lat_name)
 
@@ -976,7 +1053,17 @@ async def get_dataset_preview_3d(
                     d_min = float(np.min(depths))
                     d_max = float(np.max(depths))
                     d_range = abs(d_max - d_min) if d_max != d_min else 1.0
-                    depth_frac = float(np.clip(abs(d - d_min) / d_range, 0, 1))
+
+                    # Surface is usually closest to 0.
+                    # If coords are negative (-50 to 0), max is surface.
+                    if d_max <= 0:
+                        depth_frac = float(np.clip(abs(d - d_max) / d_range, 0, 1))
+                    else:
+                        depth_frac = float(np.clip(abs(d - d_min) / d_range, 0, 1))
+
+                    # Ensure physical plotting depth negative downwards
+                    if d_max > 0 and d_min >= 0:
+                        d = -d
 
                 for iy in range(0, ny, xy_step):
                     for ix in range(0, nx, xy_step):
