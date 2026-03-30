@@ -195,9 +195,9 @@ def _enrich_zarr_metadata(zarr_path: Path) -> dict:
                     )
                     if dt_secs > 0:
                         if dt_secs >= 3600:
-                            delta_t_str = f" (Δt={dt_secs//3600}hr)"
+                            delta_t_str = f" (Δt={dt_secs // 3600}hr)"
                         else:
-                            delta_t_str = f" (Δt={dt_secs//60}m)"
+                            delta_t_str = f" (Δt={dt_secs // 60}m)"
                     time_range = f"{d0.strftime('%b %d %H:%M')} → {d1.strftime('%b %d %H:%M')} UTC{delta_t_str}"
                 else:
                     time_range = f"{d0.strftime('%b %d %H:%M')} UTC"
@@ -296,28 +296,33 @@ async def get_cache_inventory(response: FastAPIResponse):
 
                     logging.getLogger("cfgrib.messages").setLevel(logging.ERROR)
 
-                    try:
-                        gds = xr.open_dataset(
-                            str(file_path),
-                            decode_times=True,
-                            engine="cfgrib",
-                            backend_kwargs={
-                                "filter_by_keys": {
-                                    "typeOfLevel": "surface",
-                                    "stepType": "instant",
-                                }
-                            },
-                        )
-                    except Exception:
+                    gds = None
+                    for _inv_filter in [
+                        {"typeOfLevel": "heightAboveGround", "stepType": "instant"},
+                        {"typeOfLevel": "surface", "stepType": "instant"},
+                        {"typeOfLevel": "heightAboveGround"},
+                        {"typeOfLevel": "surface"},
+                    ]:
                         try:
-                            gds = xr.open_dataset(
-                                str(file_path), decode_times=True, engine="cfgrib"
+                            _candidate = xr.open_dataset(
+                                str(file_path),
+                                decode_times=True,
+                                engine="cfgrib",
+                                backend_kwargs={"filter_by_keys": _inv_filter},
                             )
+                            if gds is None or len(list(_candidate.data_vars)) > len(
+                                list(gds.data_vars)
+                            ):
+                                gds = _candidate
+                            else:
+                                _candidate.close()
                         except Exception:
-                            try:
-                                gds = xr.open_dataset(str(file_path), decode_times=True)
-                            except Exception:
-                                gds = None
+                            continue
+                    if gds is None:
+                        try:
+                            gds = xr.open_dataset(str(file_path), decode_times=True)
+                        except Exception:
+                            gds = None
 
                     if gds is not None:
                         variables = [str(v) for v in gds.data_vars if gds[v].ndim > 0]
@@ -359,9 +364,9 @@ async def get_cache_inventory(response: FastAPIResponse):
                                     )
                                     if dt_secs > 0:
                                         delta_t_str = (
-                                            f" (Δt={dt_secs//3600}hr)"
+                                            f" (Δt={dt_secs // 3600}hr)"
                                             if dt_secs >= 3600
-                                            else f" (Δt={dt_secs//60}m)"
+                                            else f" (Δt={dt_secs // 60}m)"
                                         )
                                 if d0 == d1:
                                     time_range = f"{d0.strftime('%b %d %H:%M')} UTC"
@@ -553,8 +558,8 @@ async def get_dataset_preview(
         if var_name not in ds.variables:
             var_mapping = {
                 # Ocean IC aliases
-                "u": ["water_u", "u_current", "uo"],
-                "v": ["water_v", "v_current", "vo"],
+                "u": ["water_u", "u_current", "uo", "u10"],
+                "v": ["water_v", "v_current", "vo", "v10"],
                 "temp": ["water_temp", "temperature", "thetao"],
                 "salt": ["salinity", "so"],
                 "zeta": ["surf_el", "ssh", "zos"],

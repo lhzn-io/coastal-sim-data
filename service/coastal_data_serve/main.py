@@ -127,6 +127,7 @@ class OBCRequest(BaseModel):
     start_date: str  # ISO8601 string
     duration_hours: int
     cache_bust: bool = False
+    allow_donor_fallback: bool = False
 
 
 class ICRequest(BaseModel):
@@ -665,7 +666,7 @@ async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
 
         # KDTree IDW query (all target points at once)
         K = 4
-        dists, idxs = tree.query(query_pts, k=K)
+        dists, idxs = tree.query(query_pts, k=K, workers=-1)
         dists = np.maximum(dists, 1e-10)
         weights = 1.0 / dists**2
 
@@ -682,7 +683,7 @@ async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
             _var = src[var_name]
             assert isinstance(_var, zarr.Array)
             raw = np.array(_var[:], dtype=np.float64)
-            result = np.zeros((Nx, Ny, n_sigma), dtype=np.float32)
+            result = np.zeros((n_sigma, Ny, Nx), dtype=np.float32)
 
             for k in range(n_sigma):
                 slab = raw[k] if depth_first else raw[:, :, k]
@@ -693,33 +694,62 @@ async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
                 # Per-query IDW with level validity
                 vals_at_neighbors = vals[idxs]  # (n_query, K)
                 bad_at_neighbors = bad[idxs]
-                w = weights.copy()
-                w[bad_at_neighbors] = 0
-                ws = w.sum(axis=1, keepdims=True)
-                ws[ws == 0] = 1  # avoid div-by-zero; will be nearest-neighbor fallback
-                interpolated = (w * vals_at_neighbors).sum(axis=1) / ws.squeeze()
 
-                # For points where ALL neighbors were bad, use nearest valid
-                all_bad = ws.squeeze() == 0
-                if all_bad.any():
-                    interpolated[all_bad] = 0.0  # fallback
+                # Optimized weights calculation without full array copy for every layer
+                w = np.where(bad_at_neighbors, 0.0, weights)
+                ws = w.sum(axis=1)
 
-                result[:, :, k] = interpolated.reshape(Nx, Ny)
+                # Filter out pure-zero denominators
+                valid_ws = ws > 0
+
+                interpolated = np.zeros(query_pts.shape[0], dtype=np.float64)
+                if np.any(valid_ws):
+                    interpolated[valid_ws] = (
+                        w[valid_ws] * vals_at_neighbors[valid_ws]
+                    ).sum(axis=1) / ws[valid_ws]
+
+                result[k, :, :] = interpolated.reshape(Nx, Ny).T
 
             z = store.create_dataset(
                 var_name,
-                shape=(Nx, Ny, n_sigma),
-                chunks=(min(Nx, 256), min(Ny, 256), n_sigma),
+                shape=(n_sigma, Ny, Nx),
+                chunks=(n_sigma, min(Ny, 256), min(Nx, 256)),
                 dtype="f4",
+                fill_value=np.nan,
             )
             z[:] = result
-            z.attrs["_ARRAY_DIMENSIONS"] = ["x", "y", "s_rho"]
-            logger.info(f"Regridded {var_name}: ({Nx}, {Ny}, {n_sigma})")
+            z.attrs["_ARRAY_DIMENSIONS"] = ["s_rho", "y", "x"]
+            logger.info(f"Regridded {var_name}: ({n_sigma}, {Ny}, {Nx})")
 
-        # Copy s_rho and write metadata
-        s_arr = store.create_dataset("s_rho", shape=(n_sigma,), dtype="f4")
+        # Copy coords and write metadata
+        s_arr = store.create_dataset(
+            "s_rho", shape=(n_sigma,), dtype="f4", fill_value=np.nan
+        )
         s_arr[:] = s_rho.astype(np.float32)
         s_arr.attrs["_ARRAY_DIMENSIONS"] = ["s_rho"]
+
+        x_arr = store.create_dataset("x", shape=(Nx,), dtype="f4", fill_value=np.nan)
+        x_arr[:] = x_target.astype(np.float32)
+        x_arr.attrs["_ARRAY_DIMENSIONS"] = ["x"]
+
+        y_arr = store.create_dataset("y", shape=(Ny,), dtype="f4", fill_value=np.nan)
+        y_arr[:] = y_target.astype(np.float32)
+        y_arr.attrs["_ARRAY_DIMENSIONS"] = ["y"]
+
+        # Write projected lat/lon back for UI preview mapping
+        lon_arr = store.create_dataset(
+            "lon_rho", shape=(Ny, Nx), dtype="f4", fill_value=np.nan
+        )
+        lat_arr = store.create_dataset(
+            "lat_rho", shape=(Ny, Nx), dtype="f4", fill_value=np.nan
+        )
+        _lon_m = xx / deg2m_lon + bbox.min_lon
+        _lat_m = yy / deg2m_lat + bbox.min_lat
+        lon_arr[:] = _lon_m.T.astype(np.float32)
+        lat_arr[:] = _lat_m.T.astype(np.float32)
+        lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["y", "x"]
+        lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["y", "x"]
+
         store.attrs["bbox"] = [bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat]
         store.attrs["Nx"] = int(Nx)
         store.attrs["Ny"] = int(Ny)
@@ -727,6 +757,7 @@ async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
         store.attrs["resolution"] = float(request.resolution)
         store.attrs["source_zarr_id"] = request.zarr_id
         store.attrs["type"] = "regridded_ic"
+        store.attrs["schema_version"] = 2
 
         logger.info(f"IC regrid complete: {regrid_id} ({Nx}×{Ny}×{n_sigma})")
 
@@ -810,6 +841,7 @@ async def generate_obc(request: OBCRequest) -> Dict[str, Any]:
             bbox=bbox_list,
             cache_bust=request.cache_bust,
             zarr_path=zarr_path,
+            allow_donor_fallback=request.allow_donor_fallback,
         )
         return {
             "status": "success",

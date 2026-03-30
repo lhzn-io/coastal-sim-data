@@ -230,9 +230,11 @@ def get_ic_fetchers():
     from coastal_sim_data.fetchers import (
         hycom,
         necofs,
+        nyhops,
     )
 
     return [
+        (nyhops, nyhops.fetch_nyhops_initial_conditions),
         (necofs, necofs.fetch_necofs_initial_conditions),
         (hycom, hycom.fetch_hycom_initial_conditions),
     ]
@@ -483,6 +485,7 @@ def dispatch_obc_request(
     ),
     cache_bust: bool = False,
     zarr_path: Optional[str] = None,
+    allow_donor_fallback: bool = False,
 ) -> str:
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -498,17 +501,34 @@ def dispatch_obc_request(
     if not ranked:
         raise ValueError(f"No suitable OBC fetcher found for bbox {bbox}")
 
-    target_module, target_fetch_func, meta = ranked[0]
-    logger.info(f"Selected primary OBC Donor: {meta['name']}")
+    ds = None
+    target_module = None
+    meta = None
+    candidates_to_try = ranked if allow_donor_fallback else ranked[:1]
+    for candidate_module, candidate_fetch_func, candidate_meta in candidates_to_try:
+        logger.info(f"Trying OBC donor: {candidate_meta['name']}")
+        try:
+            ds = candidate_fetch_func(start_date, duration_hours, bbox)
+        except Exception as e:
+            logger.warning(f"{candidate_meta['name']} OBC fetch raised: {e}")
+            ds = None
+        if ds is not None:
+            target_module = candidate_module
+            meta = candidate_meta
+            logger.info(f"OBC donor succeeded: {meta['name']}")
+            break
+        if allow_donor_fallback:
+            logger.warning(
+                f"{candidate_meta['name']} OBC fetch returned no data, trying next donor."
+            )
 
-    try:
-        ds = target_fetch_func(start_date, duration_hours, bbox)
-    except Exception as e:
-        logger.error(f"{meta['name']} OBC fetch failed: {e}")
-        ds = None
-
-    if ds is None:
-        raise RuntimeError(f"Primary OBC donor {meta['name']} failed to return data.")
+    if ds is None or target_module is None:
+        tried = [c[2]["name"] for c in candidates_to_try]
+        raise RuntimeError(
+            f"Primary OBC donor {tried[0]} failed to return data."
+            if not allow_donor_fallback
+            else f"All OBC donors failed for bbox {bbox}. Tried: {tried}"
+        )
 
     # Cast strictly to Float32 for Oceananigans
     for var in ds.data_vars:
