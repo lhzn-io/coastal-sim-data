@@ -5,28 +5,61 @@ import pandas as pd
 # Ensure local imports work
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "src")))
 
-from coastal_sim_data.fetchers.nyhops import fetch_nyhops_initial_conditions
 from coastal_sim_data.fetchers.hycom import fetch_hycom_initial_conditions
 from coastal_sim_data.fetchers.maracoos import fetch_maracoos_initial_conditions
 from coastal_sim_data.fetchers.neracoos import fetch_neracoos_initial_conditions
 from coastal_sim_data.fetchers.necofs import fetch_necofs_initial_conditions
+from coastal_sim_data.fetchers.nyofs import fetch_nyofs_initial_conditions
 
 
-def test_nyhops():
-    # Throgs Neck Bridge Bounding Box (Is well within NYHOPS)
+def test_nyofs():
+    # Throgs Neck Bridge Bounding Box (NY Harbor — well within NYOFS)
     bbox = [-73.815, 40.785, -73.775, 40.815]
-    print(f"Testing NYHOPS Fetcher for {bbox}...")
+    print(f"\nTesting NYOFS Fetcher for {bbox}...")
 
-    # We use a date known to be in the recent archive or forecast
-    # OPeNDAP can be slow on large dimensions, subsetting should limit it
-    ds = fetch_nyhops_initial_conditions("2026-03-04T00:00:00Z", bbox)
+    # Use a recent date (within 31 days for FMRC access)
+    target_dt = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=12)
+    target_str = target_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    ds = fetch_nyofs_initial_conditions(target_str, bbox)
 
     if ds is not None:
-        print("NYHOPS Success! Variables:")
+        print("NYOFS Success! Variables:")
         print(list(ds.data_vars.keys()))
         print(f"U-Velocity Shape: {ds.u.shape}")
+        print(f"Dataset Dims: {ds.dims}")
+        assert "u" in ds.data_vars
+        assert "v" in ds.data_vars
+        assert "temp" in ds.data_vars
+        assert "salt" in ds.data_vars
     else:
-        print("NYHOPS returned None (Outside domain or error fetching).")
+        print("NYOFS returned None (Server unavailable or error fetching).")
+
+
+def test_nyofs_boundary_conditions():
+    """Test NYOFS boundary conditions fetch."""
+    from coastal_sim_data.fetchers.nyofs import fetch_nyofs_boundary_conditions
+
+    # Throgs Neck Bridge area
+    bbox = [-73.815, 40.785, -73.775, 40.815]
+    print(f"\nTesting NYOFS OBC Fetcher for {bbox}...")
+
+    # Use a recent date
+    target_dt = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=12)
+    target_str = target_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    ds = fetch_nyofs_boundary_conditions(target_str, 6, bbox)
+
+    if ds is not None:
+        print("NYOFS OBC Success! Variables:")
+        print(list(ds.data_vars.keys()))
+        print(f"U-Velocity Shape: {ds.u.shape}")
+        print(f"Dataset Dims: {ds.dims}")
+        assert set(ds.dims) == {"time", "depth", "eta", "xi"}
+        assert "u" in ds.data_vars
+        assert "v" in ds.data_vars
+    else:
+        print("NYOFS OBC returned None (Server unavailable or error fetching).")
 
 
 def test_hycom():
@@ -108,6 +141,8 @@ def test_necofs():
 
 if __name__ == "__main__":
     # test_nyhops() # Stevens server is offline or blocking connection
+    test_nyofs()
+    test_nyofs_boundary_conditions()
     test_necofs()
     test_maracoos()
     test_neracoos()

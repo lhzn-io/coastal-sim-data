@@ -230,11 +230,11 @@ def get_ic_fetchers():
     from coastal_sim_data.fetchers import (
         hycom,
         necofs,
-        nyhops,
+        nyofs,
     )
 
     return [
-        (nyhops, nyhops.fetch_nyhops_initial_conditions),
+        (nyofs, nyofs.fetch_nyofs_initial_conditions),
         (necofs, necofs.fetch_necofs_initial_conditions),
         (hycom, hycom.fetch_hycom_initial_conditions),
     ]
@@ -567,12 +567,13 @@ def get_obc_fetchers():
         hycom,
         necofs,
         nyhops,
+        nyofs,
     )
 
     # Dynamically discover fetch_xxx_boundary_conditions functions.
     # Not all modules have implemented OBC yet, so we check with hasattr.
     fetchers = []
-    for module in [nyhops, necofs, hycom]:
+    for module in [nyofs, nyhops, necofs, hycom]:
         func_name = "fetch_" + module.__name__.split(".")[-1] + "_boundary_conditions"
         if hasattr(module, func_name):
             fetchers.append((module, getattr(module, func_name)))

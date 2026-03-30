@@ -11,8 +11,10 @@ Atmospheric Forcing:
 - **ERA5T / ERA5**: ECMWF Copernicus Reanalysis
 
 Ocean Boundary & Initial Conditions:
+- **NYOFS** (Primary for NY/NJ Harbor): NOAA New York/New Jersey Operational Forecast System (70–150m resolution, Princeton Ocean Model/POM)
+- **NECOFS**: New England Coastal and Ocean Forecasting System (FVCOM, 200m)
 - **NERACOOS** / **MARACOOS**: Regional IOOS endpoints
-- **HYCOM**: Global fallback
+- **HYCOM**: Global fallback (9km)
 
 Point Telemetry & Nudging:
 - **ERDDAP**: Support for tabular/point-source telemetry (e.g. 3-depth temperature profiles) from platforms like the UConn ERDDAP server. Bypasses bulky NetCDF dependencies by utilizing the ``.csvp`` endpoints with ``pandas``.

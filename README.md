@@ -9,6 +9,15 @@ forecasting API endpoints (NOAA, Copernicus ERA5, HRRR, HYCOM, and IOOS
 Regional Nodes) and local high-fidelity Navier-Stokes solvers like
 `Oceananigans.jl`.
 
+Supported OBC/IC Models:
+
+- **NYOFS** (NOAA NY/NJ Operational Forecast System) — 70–150m
+  resolution, primary for NY Harbor
+- NECOFS (FVCOM) — 200m resolution for New England
+- HYCOM — Global 9km fallback
+- HRRR — Atmospheric forcing
+- ERA5 — Historical atmospheric conditions
+
 ## Architecture overview
 
 The service exposes HTTP APIs (via FastAPI) which:
@@ -16,7 +25,7 @@ The service exposes HTTP APIs (via FastAPI) which:
 1. Deterministically hash bounding boxes and time windows to manage an automated
    local Zarr cache (`~/.cache/coastal-sim-data`).
 2. Dispatch fetch operations via tiered fallbacks (e.g., HRRR -> ERA5T -> ERA5
-   for atmospheric conditions, NERACOOS -> MARACOOS -> HYCOM for initial ocean
+   for atmospheric conditions, **NYOFS -> NECOFS -> HYCOM** for initial ocean
    states, and ERDDAP for structural telemetry and nudging profiles).
 3. Regrid heterogeneous GRIB/NetCDF outputs to CF-compliant `xarray` Zarr stores
    for seamless consumption.
