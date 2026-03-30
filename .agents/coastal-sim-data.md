@@ -39,7 +39,6 @@ HTTP Request → service/coastal_data_serve/main.py
 |---|---|---|---|
 | `nyofs.py` | ~100 m | NY/NJ Harbor | POM curvilinear grid, C-grid stagger |
 | `necofs.py` | ~200 m | New England | FVCOM unstructured |
-| `nyhops.py` | ~200 m | NY Bight | Stevens NYHOPS (server intermittent) |
 | `hycom.py` | ~9 km | Global | Final fallback |
 
 Atmospheric forcing: HRRR → ERA5T → ERA5.

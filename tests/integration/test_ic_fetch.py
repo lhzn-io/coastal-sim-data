@@ -140,7 +140,6 @@ def test_necofs():
 
 
 if __name__ == "__main__":
-    # test_nyhops() # Stevens server is offline or blocking connection
     test_nyofs()
     test_nyofs_boundary_conditions()
     test_necofs()
