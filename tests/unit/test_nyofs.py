@@ -212,6 +212,71 @@ class TestInitialConditions:
         assert "salt" in result.data_vars
         assert "zeta" in result.data_vars
 
+    @patch("coastal_sim_data.fetchers.nyofs._open_nyofs_dataset")
+    def test_fetch_nyofs_ic_alternate_var_names(self, mock_open):
+        """IC fetch succeeds when FMRC uses water_u/water_temp/salinity naming."""
+        nk, neta, nxi = 4, 10, 12
+        mock_ds = xr.Dataset(
+            data_vars={
+                "water_u": (("sigma", "eta", "xi"), np.random.rand(nk, neta, nxi)),
+                "water_v": (("sigma", "eta", "xi"), np.random.rand(nk, neta, nxi)),
+                "water_temp": (
+                    ("sigma", "eta", "xi"),
+                    np.random.rand(nk, neta, nxi) + 15,
+                ),
+                "salinity": (
+                    ("sigma", "eta", "xi"),
+                    np.random.rand(nk, neta, nxi) + 30,
+                ),
+                "zeta": (("eta", "xi"), np.random.rand(neta, nxi) * 0.5),
+                "lon": (
+                    ("eta", "xi"),
+                    np.linspace(-74.0, -73.8, neta * nxi).reshape(neta, nxi),
+                ),
+                "lat": (
+                    ("eta", "xi"),
+                    np.linspace(40.6, 40.8, neta * nxi).reshape(neta, nxi),
+                ),
+                "mask": (("eta", "xi"), np.ones((neta, nxi))),
+            },
+            coords={"sigma": np.linspace(0, -1, nk)},
+        )
+        mock_open.return_value = mock_ds
+
+        result = nyofs.fetch_nyofs_initial_conditions(
+            "2024-10-15T12:00:00Z", [-74.0, 40.6, -73.8, 40.8]
+        )
+
+        assert result is not None
+        assert set(result.data_vars) >= {"u", "v", "temp", "salt", "zeta"}
+
+    @patch("coastal_sim_data.fetchers.nyofs._open_nyofs_dataset")
+    def test_fetch_nyofs_ic_returns_none_when_no_temp_salt(self, mock_open):
+        """IC fetch returns None (without downloading) when FMRC lacks temp/salt."""
+        # Simulate the actual NYOFS FMRC: currents-only, no hydrographic vars
+        mock_ds = xr.Dataset(
+            data_vars={
+                "u": (("sigma", "eta", "xi"), np.ones((7, 10, 10))),
+                "v": (("sigma", "eta", "xi"), np.ones((7, 10, 10))),
+                "w": (("sigma", "eta", "xi"), np.zeros((7, 10, 10))),
+                "zeta": (("eta", "xi"), np.zeros((10, 10))),
+                "air_u": (("eta", "xi"), np.zeros((10, 10))),
+                "air_v": (("eta", "xi"), np.zeros((10, 10))),
+                "lon": (("eta", "xi"), np.linspace(-74.0, -73.8, 100).reshape(10, 10)),
+                "lat": (("eta", "xi"), np.linspace(40.6, 40.8, 100).reshape(10, 10)),
+                "mask": (("eta", "xi"), np.ones((10, 10))),
+            },
+        )
+        mock_open.return_value = mock_ds
+
+        result = nyofs.fetch_nyofs_initial_conditions(
+            "2024-10-15T12:00:00Z", [-74.0, 40.6, -73.8, 40.8]
+        )
+
+        assert result is None
+        # Confirm compute() was never called (no expensive download attempted)
+        assert not mock_ds.get("u", xr.DataArray()).chunks  # not a dask array
+
     def test_fetch_nyofs_ic_outside_bbox(self):
         """Test that IC fetch returns None for out-of-bbox request."""
         bbox = [-70.0, 43.0, -69.0, 44.0]  # Gulf of Maine
@@ -233,6 +298,60 @@ class TestInitialConditions:
 
         # Should return None when pydap fails
         assert result is None
+
+
+class TestResolveVar:
+    """Test variable name resolution for alternate FMRC naming conventions."""
+
+    def test_resolves_canonical_names(self):
+        ds = xr.Dataset({"u": (("eta",), [1.0]), "temp": (("eta",), [15.0])})
+        assert nyofs._resolve_var(ds, "u") == "u"
+        assert nyofs._resolve_var(ds, "temp") == "temp"
+
+    def test_resolves_water_prefixed_names(self):
+        ds = xr.Dataset(
+            {
+                "water_u": (("eta",), [1.0]),
+                "water_v": (("eta",), [0.5]),
+                "water_temp": (("eta",), [15.0]),
+                "salinity": (("eta",), [32.0]),
+                "zeta": (("eta",), [0.1]),
+            }
+        )
+        assert nyofs._resolve_var(ds, "u") == "water_u"
+        assert nyofs._resolve_var(ds, "v") == "water_v"
+        assert nyofs._resolve_var(ds, "temp") == "water_temp"
+        assert nyofs._resolve_var(ds, "salt") == "salinity"
+
+    def test_raises_on_missing_var(self):
+        ds = xr.Dataset({"unknown_var": (("eta",), [1.0])})
+        with pytest.raises(KeyError, match="No variable found for role 'u'"):
+            nyofs._resolve_var(ds, "u")
+
+
+class TestOpenNYOFSDataset:
+    """Test _open_nyofs_dataset handles real-world FMRC quirks."""
+
+    @patch("coastal_sim_data.fetchers.nyofs.xr.open_dataset")
+    def test_fmrc_non_monotonic_time_index(self, mock_xr_open):
+        """FMRC dataset with non-monotonic time should still slice correctly."""
+        # Simulate a shuffled FMRC time axis (observed in production)
+        times_shuffled = pd.to_datetime(
+            ["2026-03-31", "2026-03-29", "2026-03-30", "2026-04-01"]
+        )
+        mock_ds = xr.Dataset(
+            data_vars={"u": (("time", "eta", "xi"), np.ones((4, 3, 3)))},
+            coords={"time": times_shuffled},
+        )
+        mock_xr_open.return_value = mock_ds
+
+        target_dt = pd.Timestamp("2026-03-30")
+        end_dt = pd.Timestamp("2026-03-31")
+
+        result = nyofs._open_nyofs_dataset("fmrc", "dap2://fake", target_dt, end_dt)
+
+        assert result is not None
+        assert result.sizes["time"] == 2  # 2026-03-30 and 2026-03-31
 
 
 class TestBoundaryConditions:
@@ -298,15 +417,24 @@ class TestBoundaryConditions:
 class TestDispatcherIntegration:
     """Test dispatcher registration."""
 
-    def test_nyofs_in_ic_fetchers(self):
-        """Test that NYOFS is registered in IC fetchers."""
+    def test_nyofs_not_in_ic_fetchers(self):
+        """NYOFS must not appear in IC fetchers — it is currents-only (no temp/salt)."""
         from coastal_sim_data.dispatcher import get_ic_fetchers
 
         ic_fetchers = get_ic_fetchers()
         fetcher_ids = [m.get_metadata()["id"] for m, _ in ic_fetchers]
 
-        assert "nyofs" in fetcher_ids
-        assert fetcher_ids.index("nyofs") == 0  # NYOFS should be first (best ranking)
+        assert "nyofs" not in fetcher_ids
+
+    def test_necofs_and_hycom_in_ic_fetchers(self):
+        """NECOFS and HYCOM must be the registered IC fetchers."""
+        from coastal_sim_data.dispatcher import get_ic_fetchers
+
+        ic_fetchers = get_ic_fetchers()
+        fetcher_ids = [m.get_metadata()["id"] for m, _ in ic_fetchers]
+
+        assert "necofs" in fetcher_ids
+        assert "hycom" in fetcher_ids
 
     def test_nyofs_in_obc_fetchers(self):
         """Test that NYOFS is registered in OBC fetchers."""
@@ -317,15 +445,15 @@ class TestDispatcherIntegration:
 
         assert "nyofs" in fetcher_ids
 
-    def test_nyofs_ranks_above_necofs_for_harbor(self):
-        """Test that NYOFS ranks above NECOFS for NY Harbor bbox."""
+    def test_necofs_ranks_above_hycom_for_harbor(self):
+        """NECOFS (smaller domain, finer res) should rank above HYCOM for NY Harbor."""
         from coastal_sim_data.dispatcher import _rank_ic_candidates
 
         bbox = [-73.815, 40.785, -73.775, 40.815]
         ranked = _rank_ic_candidates(bbox)
 
         assert len(ranked) > 0
-        assert ranked[0][2]["id"] == "nyofs"  # NYOFS should be first
+        assert ranked[0][2]["id"] == "necofs"
 
 
 if __name__ == "__main__":

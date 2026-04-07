@@ -116,14 +116,6 @@ def fetch_necofs_initial_conditions(
         lonc = ds["lonc"].values
         latc = ds["latc"].values
 
-        # FVCOM nv is 1-indexed, shape can be (nele, 3) or (3, nele)
-        # Often it is (3, nele). We transpose to (nele, 3) and subtract 1.
-        nv_raw = ds["nv"].values
-        if nv_raw.shape[0] == 3:
-            nv = nv_raw.T - 1
-        else:
-            nv = nv_raw - 1
-
         _h = ds["h"].values  # noqa: F841 — needed for future depth mapping
         _siglay = ds["siglay"].values  # noqa: F841 — shape: (siglay, node)
 
@@ -175,29 +167,27 @@ def fetch_necofs_initial_conditions(
         # Create target structured meshgrid
         lon_grid, lat_grid = np.meshgrid(lon_rho, lat_rho)
 
-        logger.info("Building explicit FVCOM triangulations for regridding...")
-        import matplotlib.tri as mtri
+        logger.info("Building FVCOM interpolators for regridding...")
 
-        # Node-based triangulation mapping exactly to physical bounds
-        fvcom_tri = mtri.Triangulation(lon, lat, triangles=nv)
+        # Node-based interpolator (temp, salt, zeta — defined at mesh nodes)
+        pts_node = np.column_stack((lon, lat))
+        tri_node = Delaunay(pts_node)
 
-        # Element-based triangulation (for U, V, unconstrained convex hull)
+        # Element-based interpolator (u, v — defined at element centroids)
         pts_elem = np.column_stack((lonc, latc))
         tri_elem = Delaunay(pts_elem)
 
+        target_pts = np.column_stack((lon_grid.ravel(), lat_grid.ravel()))
+
         logger.info("Interpolating variables to structured grid...")
 
-        # Helper for node interpolation strictly inside real mesh boundaries
         def interpolate_nodes(field_vals):
-            # Returns a numpy MaskedArray, use filled(nan) to return normal floats
-            interp = mtri.LinearTriInterpolator(fvcom_tri, field_vals)
-            return interp(lon_grid, lat_grid).filled(np.nan)
+            interp = LinearNDInterpolator(tri_node, field_vals)
+            return interp(target_pts).reshape(lon_grid.shape)
 
-        # Helper for element interpolation
         def interpolate_elems(field_vals, strict_mask):
             interp = LinearNDInterpolator(tri_elem, field_vals)
-            val = interp(lon_grid, lat_grid)
-            # Clip unconstrained elements convex hull using the strict node boundary mask
+            val = interp(target_pts).reshape(lon_grid.shape)
             val[strict_mask] = np.nan
             return val
 
@@ -315,23 +305,15 @@ def fetch_necofs_boundary_conditions(
         lonc = ds["lonc"].values
         latc = ds["latc"].values
 
-        nv_raw = ds["nv"].values
-        if nv_raw.shape[0] == 3:
-            nv = nv_raw.T - 1
-        else:
-            nv = nv_raw - 1
-
         d_spacing = 0.002
         lon_rho = np.arange(min_lon, max_lon, d_spacing)
         lat_rho = np.arange(min_lat, max_lat, d_spacing)
         lon_grid, lat_grid = np.meshgrid(lon_rho, lat_rho)
+        target_pts = np.column_stack((lon_grid.ravel(), lat_grid.ravel()))
 
-        import matplotlib.tri as mtri
-        from scipy.spatial import Delaunay
-        from scipy.interpolate import LinearNDInterpolator
-
-        logger.info("Building NECOFS explicit interpolators...")
-        fvcom_tri = mtri.Triangulation(lon, lat, triangles=nv)
+        logger.info("Building NECOFS OBC interpolators...")
+        pts_node = np.column_stack((lon, lat))
+        tri_node = Delaunay(pts_node)
         pts_elem = np.column_stack((lonc, latc))
         tri_elem = Delaunay(pts_elem)
 
@@ -349,11 +331,11 @@ def fetch_necofs_boundary_conditions(
         u_out = np.zeros((nt, nz, ny, nx), dtype=np.float32)
         v_out = np.zeros((nt, nz, ny, nx), dtype=np.float32)
 
-        # Base land mask off full domain Zeta
-        # We can evaluate zeta at time 0
+        # Base land mask off full domain Zeta at time 0
         zeta_0 = ds_t["zeta"].isel(time=0).values
-        interp = mtri.LinearTriInterpolator(fvcom_tri, zeta_0)
-        zeta_grid = interp(lon_grid, lat_grid).filled(np.nan)
+        zeta_grid = LinearNDInterpolator(tri_node, zeta_0)(target_pts).reshape(
+            lon_grid.shape
+        )
         land_mask = np.isnan(zeta_grid)
 
         logger.info(f"Extracting {nt} time steps for 4D OBC boundaries...")

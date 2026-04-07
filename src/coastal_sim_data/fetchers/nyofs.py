@@ -173,6 +173,9 @@ def _open_nyofs_dataset(
             # Determine time variable name
             time_var = "time" if "time" in ds.coords else "ocean_time"
 
+            # FMRC aggregations can have non-monotonic time indices; sort before slicing
+            ds = ds.sortby(time_var)
+
             # Slice to requested time range
             if end_dt is None:
                 ds_t = ds.sel({time_var: target_dt}, method="nearest")
@@ -220,6 +223,27 @@ def _open_nyofs_dataset(
     except Exception as e:
         logger.error(f"Failed to open NYOFS dataset ({access_mode}): {e}")
         return None
+
+
+_VAR_CANDIDATES: dict[str, list[str]] = {
+    "u": ["u", "water_u", "u_eastward"],
+    "v": ["v", "water_v", "v_northward"],
+    "temp": ["temp", "water_temp", "temperature", "sea_water_temperature"],
+    "salt": ["salt", "salinity", "sea_water_salinity"],
+    "zeta": ["zeta", "sea_surface_height", "ssh"],
+}
+
+
+def _resolve_var(ds: xr.Dataset, role: str) -> str:
+    """Return the first candidate name for *role* that exists in *ds*."""
+    for name in _VAR_CANDIDATES[role]:
+        if name in ds:
+            return name
+    available = list(ds.data_vars)
+    raise KeyError(
+        f"No variable found for role '{role}'. "
+        f"Tried: {_VAR_CANDIDATES[role]}. Available: {available}"
+    )
 
 
 def _c_grid_to_rho(
@@ -283,6 +307,21 @@ def fetch_nyofs_initial_conditions(
     if ds_t is None:
         return None
 
+    # Check for required hydrographic variables before the expensive download.
+    # The FMRC endpoint is currents-only (u, v, w, zeta); temp/salt are absent.
+    missing = [
+        role
+        for role in ("temp", "salt")
+        if not any(name in ds_t for name in _VAR_CANDIDATES[role])
+    ]
+    if missing:
+        logger.warning(
+            f"NYOFS dataset lacks hydrographic variables {missing} "
+            f"(available: {list(ds_t.data_vars)}). "
+            "Cannot produce ICs — use HYCOM or NECOFS for temperature/salinity."
+        )
+        return None
+
     try:
         # Spatial subsetting via curvilinear 2D mask
         lon_var = "lon"
@@ -301,8 +340,19 @@ def fetch_nyofs_initial_conditions(
         logger.info("Executing OPeNDAP download for NYOFS IC subset...")
         ds_subset = ds_subset.compute()
 
+        # Resolve actual variable names (FMRC may use water_u/water_temp/salinity etc.)
+        u_var = _resolve_var(ds_subset, "u")
+        v_var = _resolve_var(ds_subset, "v")
+        temp_var = _resolve_var(ds_subset, "temp")
+        salt_var = _resolve_var(ds_subset, "salt")
+        zeta_var = _resolve_var(ds_subset, "zeta")
+        logger.info(
+            f"NYOFS IC variable mapping: u={u_var}, v={v_var}, "
+            f"temp={temp_var}, salt={salt_var}, zeta={zeta_var}"
+        )
+
         # Detect dimensions
-        all_dims = list(ds_subset.u.dims)
+        all_dims = list(ds_subset[u_var].dims)
         sigma_dim = None
         for candidate in ["sigma", "s_rho", "depth", "siglay"]:
             if candidate in all_dims:
@@ -323,14 +373,14 @@ def fetch_nyofs_initial_conditions(
         xi_dim = spatial_dims[1] if len(spatial_dims) > 1 else spatial_dims[0]
 
         # C-grid interpolation: average adjacent face values to rho-points
-        u_raw = ds_subset["u"].values
-        v_raw = ds_subset["v"].values
+        u_raw = ds_subset[u_var].values
+        v_raw = ds_subset[v_var].values
         u_rho, v_rho = _c_grid_to_rho(u_raw, v_raw)
 
         # Extract temp and salt (already at rho-points)
-        temp_sub = ds_subset["temp"].values.astype(np.float32)
-        salt_sub = ds_subset["salt"].values.astype(np.float32)
-        zeta_sub = ds_subset["zeta"].values.astype(np.float32)
+        temp_sub = ds_subset[temp_var].values.astype(np.float32)
+        salt_sub = ds_subset[salt_var].values.astype(np.float32)
+        zeta_sub = ds_subset[zeta_var].values.astype(np.float32)
         lon_sub = ds_subset[lon_var].values.astype(np.float32)
         lat_sub = ds_subset[lat_var].values.astype(np.float32)
 
@@ -419,8 +469,13 @@ def fetch_nyofs_boundary_conditions(
         logger.info("Executing OPeNDAP download for NYOFS OBC subset...")
         ds_sub = ds_sub.compute()
 
+        # Resolve actual variable names
+        u_var = _resolve_var(ds_sub, "u")
+        v_var = _resolve_var(ds_sub, "v")
+        logger.info(f"NYOFS OBC variable mapping: u={u_var}, v={v_var}")
+
         # Detect dimensions
-        all_dims = list(ds_sub.u.dims)
+        all_dims = list(ds_sub[u_var].dims)
         time_var = "time" if "time" in ds_sub.coords else "ocean_time"
         sigma_dim = None
         for candidate in ["sigma", "s_rho", "depth", "siglay"]:
@@ -444,8 +499,8 @@ def fetch_nyofs_boundary_conditions(
         xi_dim = spatial_dims[1]  # noqa: F841
 
         # C-grid interpolation: vectorized over all leading dims (time, sigma, ...)
-        u_raw = ds_sub["u"].values
-        v_raw = ds_sub["v"].values
+        u_raw = ds_sub[u_var].values
+        v_raw = ds_sub[v_var].values
         u_rho, v_rho = _c_grid_to_rho(
             u_raw.astype(np.float32), v_raw.astype(np.float32)
         )

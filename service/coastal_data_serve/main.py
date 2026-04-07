@@ -403,6 +403,16 @@ class TCPredictRequest(BaseModel):
     target_date: str
 
 
+@app.post("/api/v1/bc/cache")
+async def cache_bc(request: ForcingRequest) -> Dict[str, Any]:
+    import hashlib
+
+    hash_str = f"{request.bbox.min_lon}_{request.bbox.max_lon}_{request.bbox.min_lat}_{request.bbox.max_lat}_{request.start_time}_{request.end_time}_{request.station_id}"
+    md5_hash = hashlib.md5(hash_str.encode()).hexdigest()[:12]
+    zarr_id = f"bc_{md5_hash}"
+    return {"status": "success", "zarr_id": zarr_id}
+
+
 @app.post("/api/v1/bc/predict-donor")
 async def predict_bc_donor_endpoint(request: TCPredictRequest) -> Dict[str, Any]:
     """Predicts which boundary condition donor will be used for a given target date."""
@@ -420,6 +430,26 @@ async def predict_bc_donor_endpoint(request: TCPredictRequest) -> Dict[str, Any]
     except Exception as e:
         logger.error(f"Failed to predict BC donor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/ic/cache")
+async def cache_ic(request: ICRequest) -> Dict[str, Any]:
+    import hashlib
+
+    from coastal_sim_data.dispatcher import predict_ic_donor
+
+    bbox_list = [
+        request.bbox.min_lon,
+        request.bbox.min_lat,
+        request.bbox.max_lon,
+        request.bbox.max_lat,
+    ]
+    donor_meta = predict_ic_donor(bbox_list)
+    donor_id = donor_meta["id"] if donor_meta else "unknown"
+    hash_str = f"{request.bbox.min_lon}_{request.bbox.max_lon}_{request.bbox.min_lat}_{request.bbox.max_lat}_{request.target_date}_{donor_id}"
+    md5_hash = hashlib.md5(hash_str.encode()).hexdigest()[:12]
+    zarr_id = f"ic_{md5_hash}"
+    return {"status": "success", "zarr_id": zarr_id}
 
 
 @app.post("/api/v1/ic/predict-donor")
@@ -773,6 +803,27 @@ async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"IC regrid failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/obc/cache")
+async def cache_obc(request: OBCRequest) -> Dict[str, Any]:
+    import hashlib
+
+    from coastal_sim_data.dispatcher import predict_obc_donor
+
+    bbox_list = [
+        request.bbox.min_lon,
+        request.bbox.min_lat,
+        request.bbox.max_lon,
+        request.bbox.max_lat,
+    ]
+    donor_meta = predict_obc_donor(bbox_list)
+    donor_id = donor_meta.get("id", "unknown")
+    hash_str = (
+        f"{bbox_list}_{request.start_date}_{request.duration_hours}_{donor_id}_obc"
+    )
+    zarr_id = hashlib.md5(hash_str.encode()).hexdigest()[:12]
+    return {"status": "success", "zarr_id": f"obc_{zarr_id}"}
 
 
 @app.post("/api/v1/obc/predict-donor")

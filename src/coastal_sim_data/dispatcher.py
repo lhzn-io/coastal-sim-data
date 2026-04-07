@@ -230,11 +230,11 @@ def get_ic_fetchers():
     from coastal_sim_data.fetchers import (
         hycom,
         necofs,
-        nyofs,
     )
 
+    # NYOFS is intentionally excluded: the FMRC endpoint is currents-only (u, v, w, zeta)
+    # and does not publish temperature or salinity. Use NYOFS for OBCs only.
     return [
-        (nyofs, nyofs.fetch_nyofs_initial_conditions),
         (necofs, necofs.fetch_necofs_initial_conditions),
         (hycom, hycom.fetch_hycom_initial_conditions),
     ]
