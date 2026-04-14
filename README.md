@@ -2,7 +2,7 @@
 
 `coastal-sim-data` is a highly-optimized data acquisition and transformation
 service designed to provide boundary and initial conditions for 3D hydrodynamic
-coastal simulations (like `coastal-sim`).
+coastal simulations.
 
 It acts as a caching and regridding intermediary between large-scale operational
 forecasting API endpoints (NOAA, Copernicus ERA5, HRRR, HYCOM, and IOOS
@@ -37,6 +37,27 @@ uv sync
 pre-commit install
 uv run uvicorn service.coastal_data_serve.main:app --port 9598
 ```
+
+## Docker
+
+The `Dockerfile` defaults to `ubuntu:24.04` (x86_64).
+Override `BASE_IMAGE` for other targets:
+
+```bash
+# x86_64 (default)
+docker build -t coastal-sim-data .
+
+# NVIDIA Jetson AGX Orin (JetPack 6.x)
+docker build \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/l4t-base:r36.2.0 \
+  -t coastal-sim-data .
+
+# Run the service
+docker run --rm -p 9598:9598 coastal-sim-data
+```
+
+Validated platforms: x86_64 (Ubuntu 24.04) and Jetson AGX Orin
+(JetPack 6.1 / L4T r36.2).
 
 ## Licensing
 
