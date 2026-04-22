@@ -608,7 +608,12 @@ async def regrid_ic(request: ICRegridRequest) -> Dict[str, Any]:
     src_zarr = os.path.join(base_dir, f"{request.zarr_id}.zarr")
     if not os.path.exists(src_zarr):
         # Try engine cache as fallback
-        engine_cache = Path("~/.cache/coastal-sim/ic").expanduser()
+        engine_cache = (
+            Path(
+                os.environ.get("COASTAL_SIM_CACHE_DIR", "~/.cache/coastal-sim")
+            ).expanduser()
+            / "ic"
+        )
         src_zarr = os.path.join(engine_cache, f"{request.zarr_id}.zarr")
         if not os.path.exists(src_zarr):
             raise HTTPException(

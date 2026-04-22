@@ -37,6 +37,11 @@ COPY static/ /app/static/
 # We use --frozen to respect uv.lock
 RUN uv sync --frozen --no-dev --compile-bytecode
 
+# Fix ownership so non-root users can write to .venv
+ARG UID=1000
+ARG GID=1000
+RUN chown -R ${UID}:${GID} /app
+
 # Default port 9598
 EXPOSE 9598
 

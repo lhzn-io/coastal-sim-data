@@ -70,7 +70,18 @@ async def fuse_bathymetry(
         logger.info(
             f"TopoBathySim is local ({topobathy_url}). Streaming directly to avoid disk duplication."
         )
-        return await stream_remote_file(target_url)
+        try:
+            return await stream_remote_file(target_url)
+        except httpx.ConnectError:
+            raise HTTPException(
+                status_code=502,
+                detail=f"TopoBathySim is unreachable at {topobathy_url}. Please ensure the service is running on port 9595.",
+            )
+        except httpx.ReadTimeout:
+            raise HTTPException(
+                status_code=504,
+                detail=f"TopoBathySim at {topobathy_url} timed out during fusion.",
+            )
 
     # --- IF REMOTE, Cache Strategy is Engaged ---
     logger.info(
@@ -151,7 +162,19 @@ async def fuse_bathymetry_post(request: FusionRequest):
         req = client.build_request(
             "POST", target_url, timeout=3600.0, json=request.model_dump()
         )
-        response = await client.send(req, stream=True)
+        try:
+            response = await client.send(req, stream=True)
+        except httpx.ConnectError:
+            raise HTTPException(
+                status_code=502,
+                detail=f"TopoBathySim is unreachable at {topobathy_url}. Please ensure the service is running on port 9595.",
+            )
+        except httpx.ReadTimeout:
+            raise HTTPException(
+                status_code=504,
+                detail=f"TopoBathySim at {topobathy_url} timed out during fusion.",
+            )
+
         if response.status_code != 200:
             text = await response.aread()
             await response.aclose()
